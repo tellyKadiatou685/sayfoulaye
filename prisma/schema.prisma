@@ -1,0 +1,292 @@
+// schema.prisma - VERSION OPTIMISÉE (changements de BigInt vers Int)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+ 
+}
+
+// ===================================
+// ENUMS (inchangés)
+// ===================================
+
+enum UserRole {
+  ADMIN
+  SUPERVISEUR
+  PARTENAIRE
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING
+  REJECTED
+}
+
+enum TransactionType {
+  DEPOT
+  RETRAIT
+  TRANSFERT_ENVOYE
+  TRANSFERT_RECU
+  ALLOCATION_UV_MASTER
+  DEBUT_JOURNEE
+  FIN_JOURNEE
+  AUDIT_MODIFICATION
+  AUDIT_SUPPRESSION
+}
+
+enum AccountType {
+  LIQUIDE
+  ORANGE_MONEY
+  WAVE
+  UV_MASTER
+  AUTRES
+}
+
+enum NotificationType {
+  DEPOT_PARTENAIRE
+  RETRAIT_PARTENAIRE
+  TRANSFERT_SUPERVISEUR
+  DEMANDE_INSCRIPTION
+  CREATION_UTILISATEUR
+  ALLOCATION_UV_MASTER
+  DEBUT_JOURNEE
+  FIN_JOURNEE
+  AUDIT_MODIFICATION
+  AUDIT_SUPPRESSION
+}
+
+// ===================================
+// MODELES UTILISATEURS (inchangés)
+// ===================================
+
+model User {
+  id        String     @id @default(cuid())
+  telephone String     @unique
+  code      String
+  codeClair String?
+  nomComplet String
+  adresse   String
+  photo     String?
+  role      UserRole
+  status    UserStatus @default(ACTIVE)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  // Relations
+  accounts                     Account[]
+  transactionsEnvoyees         Transaction[] @relation("TransactionEnvoyeur")
+  transactionsRecues           Transaction[] @relation("TransactionDestinataire") 
+  transactionsPartenaire       Transaction[] @relation("TransactionPartenaire")
+  notifications                Notification[]
+  demandesInscription          RegistrationRequest[]
+  dailySnapshots               DailySnapshot[]
+  choixPartenaireQuotidiens    DailyPartnerChoice[] @relation("PartenaireChoices")
+  choixSuperviseurQuotidiens   DailyPartnerChoice[] @relation("SuperviseurChoices")
+  
+  @@map("users")
+}
+
+// ===================================
+// DEMANDES D'INSCRIPTION PARTENAIRES (inchangées)
+// ===================================
+
+model RegistrationRequest {
+  id        String     @id @default(cuid())
+  telephone String     @unique
+  nomComplet String
+  adresse   String
+  message   String?
+  status    UserStatus @default(PENDING)
+  
+  codeGenere String?
+  
+  reviewedBy   User?     @relation(fields: [reviewedById], references: [id], map: "reg_req_reviewed_by_fkey")
+  reviewedById String?
+  reviewedAt   DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("registration_requests")
+}
+
+// ===================================
+// CHOIX QUOTIDIENS PARTENAIRES (inchangés)
+// ===================================
+
+model DailyPartnerChoice {
+  id   String @id @default(cuid())
+  date DateTime @db.Date
+  
+  partenaireId String
+  partenaire   User   @relation("PartenaireChoices", fields: [partenaireId], references: [id], map: "daily_partner_partenaire_fkey")
+  
+  superviseurId String
+  superviseur   User   @relation("SuperviseurChoices", fields: [superviseurId], references: [id], map: "daily_partner_superviseur_fkey")
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([partenaireId, date])
+  @@map("daily_partner_choices")
+}
+
+// ===================================
+// COMPTES ET SOLDES - OPTIMISÉ ✅
+// ===================================
+
+model Account {
+  id      String      @id @default(cuid())
+  type    AccountType
+ balance BigInt      @default(0)        // ✅ Remis en BigInt
+  initialBalance BigInt  @default(0)     // ✅ Remis en BigInt
+  previousInitialBalance BigInt  @default(0)  
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  transactionsOrigine     Transaction[] @relation("TransactionCompteOrigine")
+  transactionsDestination Transaction[] @relation("TransactionCompteDestination")
+  
+  @@unique([userId, type])  // ✅ AJOUTÉ : Contrainte unique pour optimiser les upserts
+  @@map("accounts")
+  
+  // ✅ INDEX OPTIMISÉS pour les requêtes fréquentes
+  @@index([userId, type])
+  @@index([type])
+  @@index([balance])
+}
+
+// ===================================
+// TRANSACTIONS - OPTIMISÉES ✅
+// ===================================
+
+model Transaction {
+  id          String          @id @default(cuid())
+  montant     BigInt            // ✅ CHANGÉ : BigInt → Int (stockage en centimes)
+  type        TransactionType
+  description String?
+  archived    Boolean?   @default(false)
+  archivedAt  DateTime?
+  
+  envoyeurId String
+  envoyeur   User   @relation("TransactionEnvoyeur", fields: [envoyeurId], references: [id], map: "transaction_envoyeur_fkey")
+  
+  destinataireId String?
+  destinataire   User?   @relation("TransactionDestinataire", fields: [destinataireId], references: [id], map: "transaction_destinataire_fkey")
+  
+  partenaireId String?
+  partenaire   User?   @relation("TransactionPartenaire", fields: [partenaireId], references: [id], map: "transaction_partenaire_fkey")
+  
+  compteOrigineId     String?
+  compteOrigine       Account? @relation("TransactionCompteOrigine", fields: [compteOrigineId], references: [id], map: "transaction_compte_origine_fkey")
+  compteDestinationId String?
+  compteDestination   Account? @relation("TransactionCompteDestination", fields: [compteDestinationId], references: [id], map: "transaction_compte_destination_fkey")
+  
+  isValidated Boolean @default(true)
+  metadata    String? @db.Text
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("transactions")
+  
+  // ✅ INDEX OPTIMISÉS pour les requêtes Dashboard
+  @@index([type, createdAt])
+  @@index([envoyeurId, createdAt])
+  @@index([destinataireId, createdAt])
+  @@index([partenaireId, createdAt])
+  @@index([createdAt])
+  @@index([type, destinataireId, createdAt])  // Composite pour dashboard superviseur
+}
+
+// ===================================
+// NOTIFICATIONS (inchangées mais avec index)
+// ===================================
+
+model Notification {
+  id      String           @id @default(cuid())
+  type    NotificationType
+  title   String
+  message String
+  isRead  Boolean          @default(false)
+  
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade, map: "notification_user_fkey")
+  
+  data Json?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("notifications")
+  
+  // ✅ INDEX pour optimiser les requêtes notifications
+  @@index([userId, isRead, createdAt])
+  @@index([createdAt])
+}
+
+// ===================================
+// HISTORIQUE QUOTIDIEN (inchangé)
+// ===================================
+
+model DailySnapshot {
+  id   String @id @default(cuid())
+  date DateTime @db.Date
+  
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  liquideDebut      BigInt @default(0)   // ✅ Remis en BigInt
+  orangeMoneyDebut  BigInt @default(0)   // ✅
+  waveDebut         BigInt @default(0)   // ✅
+  uvMasterDebut     BigInt @default(0)   // ✅
+  autresDebut       BigInt @default(0)   // ✅
+  
+  liquideFin        BigInt @default(0)   // ✅
+  orangeMoneyFin    BigInt @default(0)   // ✅
+  waveFin           BigInt @default(0)   // ✅
+  uvMasterFin       BigInt @default(0)   // ✅
+  autresFin         BigInt @default(0)   // ✅
+  
+  debutTotal   BigInt @default(0)        // ✅
+  sortieTotal  BigInt @default(0)        // ✅
+  grTotal      BigInt @default(0)        // ✅
+  
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([userId, date])
+  @@map("daily_snapshots")
+  
+  // ✅ INDEX pour optimiser les requêtes historiques
+  @@index([date])
+  @@index([userId, date])
+}
+
+// ===================================
+// CONFIGURATION SYSTÈME - OPTIMISÉE ✅
+// ===================================
+
+model SystemConfig {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@map("system_config")
+  
+  // ✅ INDEX pour optimiser les requêtes de configuration
+  @@index([key])
+}
