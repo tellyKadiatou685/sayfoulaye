@@ -32,15 +32,9 @@ const validateAmount = (req, res, next) => {
   next();
 };
 
-// Middleware de validation pour les types de compte - CORRIGÉ
+// Middleware de validation pour les types de compte
 const validateAccountType = (req, res, next) => {
-  const { typeCompte, partenaireId } = req.body;
-  
-  // EXEMPTION pour les transactions partenaires
-  if (partenaireId) {
-    return next(); // Passer directement si c'est une transaction partenaire
-  }
-  
+  const { typeCompte } = req.body;
   const validTypes = ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER', 'AUTRES'];
   
   if (!typeCompte || !validTypes.includes(typeCompte.toUpperCase())) {
@@ -96,123 +90,12 @@ router.get('/dashboard',
   TransactionController.getDashboard
 );
 
-// Dans routes/transactionRoutes.js ou adminRoutes.js
-router.get('/dashboard/dates/available', authenticateToken, TransactionController.getAvailableDates);
-router.post('/dashboard/test-date-filter', authenticateToken, TransactionController.testDateFilter);
-
 // 📊 Dashboard admin spécifique (tous les superviseurs)
 router.get('/dashboard/admin', 
   authenticateToken, 
   requireAdmin, 
   TransactionController.getAdminDashboard
 );
-
-// Dans transactionRoutes.js
-
-router.get('/test-yesterday-full-flow', async (req, res) => {
-  try {
-    const now = new Date();
-    const today = now.toDateString();
-    
-    // Calculer la plage "hier"
-    const yesterdayStart = new Date(now);
-    yesterdayStart.setDate(now.getDate() - 1);
-    yesterdayStart.setHours(0, 0, 0, 0);
-    
-    const yesterdayEnd = new Date(now);
-    yesterdayEnd.setHours(0, 0, 0, -1);
-    
-    // Compter manuellement dans la DB
-    const archivedCount = await prisma.transaction.count({
-      where: {
-        createdAt: { gte: yesterdayStart, lte: yesterdayEnd },
-        partenaireId: { not: null },
-        archived: true
-      }
-    });
-    
-    const archivedTransactions = await prisma.transaction.findMany({
-      where: {
-        createdAt: { gte: yesterdayStart, lte: yesterdayEnd },
-        partenaireId: { not: null },
-        archived: true
-      },
-      select: {
-        id: true,
-        type: true,
-        montant: true,
-        createdAt: true,
-        partenaire: { select: { nomComplet: true } },
-        destinataire: { select: { nomComplet: true } }
-      }
-    });
-    
-    // Vérifier reset detection
-    const config = await prisma.systemConfig.findFirst({
-      where: { key: 'last_reset_date' }
-    });
-    
-    const resetDetected = config?.value?.includes(today) && config.value.includes('SUCCESS');
-    
-    res.json({
-      currentTime: now.toISOString(),
-      yesterdayRange: {
-        start: yesterdayStart.toISOString(),
-        end: yesterdayEnd.toISOString()
-      },
-      transactionsInDB: {
-        count: archivedCount,
-        transactions: archivedTransactions
-      },
-      resetDetection: {
-        lastResetDate: config?.value,
-        resetDetectedToday: resetDetected,
-        shouldIncludeArchived: resetDetected && archivedCount > 0
-      },
-      nextStep: "Appelez maintenant GET /api/transactions/dashboard/admin?period=yesterday et comparez"
-    });
-    
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-router.post('/force-show-yesterday', async (req, res) => {
-  try {
-    // 1. Forcer shouldIncludeArchivedTransactions à retourner true
-    await prisma.systemConfig.upsert({
-      where: { key: 'last_reset_date' },
-      update: { value: `${new Date().toDateString()}-SUCCESS-forced` },
-      create: { key: 'last_reset_date', value: `${new Date().toDateString()}-SUCCESS-forced` }
-    });
-
-    // 2. Mettre les transactions exactement dans la plage d'hier
-    const now = new Date();
-    const yesterdayMidday = new Date(now);
-    yesterdayMidday.setDate(now.getDate() - 1);
-    yesterdayMidday.setHours(12, 0, 0, 0);
-
-    await prisma.transaction.updateMany({
-      where: {
-        archived: true,
-        partenaireId: { not: null }
-      },
-      data: {
-        createdAt: yesterdayMidday,
-        archived: true,
-        archivedAt: now
-      }
-    });
-
-    res.json({
-      success: true,
-      message: "Transactions forcées dans Hier",
-      instruction: "Rafraîchissez la page et cliquez sur Hier"
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // 👤 Dashboard superviseur spécifique
 router.get('/dashboard/supervisor/:supervisorId?', 
@@ -294,9 +177,6 @@ router.get('/partners/active',
     }
   }
 );
-
-router.get('/admin/daily-transfer/status', TransactionController.getDailyTransferStatus);
-router.get('/admin/transactions/archived', TransactionController.getArchivedTransactions);
 
 // 📊 Types de comptes disponibles
 router.get('/account-types', 

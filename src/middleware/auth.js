@@ -4,7 +4,6 @@ import prisma from '../config/database.js';
 
 // 🔐 Middleware pour vérifier le token JWT
 export const authenticateToken = async (req, res, next) => {
-  if (req.method === 'OPTIONS') return next();
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
