@@ -3,12 +3,8 @@
 import { PrismaClient } from '@prisma/client';
 import TransactionService from '../src/services/TransactionService.js';
 
-// Instance Prisma pour le CRON (si nécessaire pour des opérations isolées)
 const prisma = new PrismaClient();
 
-// =====================================
-// HANDLER API PRINCIPAL - APPELLE LE SERVICE
-// =====================================
 export default async function handler(req, res) {
   console.log("🚀 [VERCEL CRON] Démarrage du CRON automatique");
   
@@ -27,11 +23,7 @@ export default async function handler(req, res) {
       });
     }
 
-    // Configuration du reset affichée
-    const resetConfig = TransactionService.getResetConfig();
-    console.log(`🔧 [VERCEL CRON] Configuration reset:`, resetConfig);
-    
-    // ⭐ APPEL DU SERVICE - toute la logique est déjà là !
+    // ⭐ APPEL DU SERVICE - supprimez la ligne getResetConfig
     const result = await TransactionService.forceReset('vercel-cron');
     
     console.log("✅ [VERCEL CRON] Exécution terminée avec succès");
@@ -40,7 +32,6 @@ export default async function handler(req, res) {
       success: true,
       data: result,
       timestamp: new Date().toISOString(),
-      resetConfig,
       nextExecution: "Quotidien à 00h00 UTC via Vercel CRON"
     });
 
@@ -54,7 +45,6 @@ export default async function handler(req, res) {
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   } finally {
-    // Déconnexion propre de Prisma
     await prisma.$disconnect();
   }
 }
