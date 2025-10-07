@@ -325,6 +325,7 @@ class UserController {
 // 🗑️ SUPPRIMER UTILISATEUR (Admin)
 // Contrôleur deleteUser corrigé (remplacez votre version actuelle)
 
+
 async deleteUser(req, res) {
   try {
     const { userId } = req.params;

@@ -780,9 +780,15 @@ async getPartners(options = {}) {
   // Ajoutez cette méthode dans votre UserService.js
 // Placez-la dans la section "GESTION UTILISATEURS (Admin)" après la méthode activateUser
 
-// 🗑️ SUPPRIMER UTILISATEUR (Admin seulement)
+// Dans UserService.js, remplacez la méthode deleteUser par :
+// Dans UserService.js, remplacez la méthode deleteUser par :
+
+// Dans UserService.js, remplacez complètement la méthode deleteUser par cette version simplifiée :
+
 async deleteUser(adminId, userId, reason = null) {
   try {
+    console.log('🗑️ [SERVICE] Début suppression:', { adminId, userId, reason });
+
     // Vérifier que l'utilisateur à supprimer existe
     const userToDelete = await prisma.user.findUnique({
       where: { id: userId },
@@ -798,6 +804,8 @@ async deleteUser(adminId, userId, reason = null) {
       throw new Error('Utilisateur introuvable');
     }
 
+    console.log('✅ [SERVICE] Utilisateur trouvé:', userToDelete.nomComplet);
+
     // Vérifier que ce n'est pas un admin
     if (userToDelete.role === 'ADMIN') {
       throw new Error('Impossible de supprimer un administrateur');
@@ -808,11 +816,6 @@ async deleteUser(adminId, userId, reason = null) {
       throw new Error('Vous ne pouvez pas supprimer votre propre compte');
     }
 
-    // Vérifier s'il y a des transactions importantes
-    const hasTransactions = userToDelete.transactionsEnvoyees.length > 0 || 
-                           userToDelete.transactionsRecues.length > 0 || 
-                           userToDelete.transactionsPartenaire.length > 0;
-
     // Vérifier s'il y a des comptes avec solde
     const hasBalance = userToDelete.accounts.some(account => 
       account.balance > 0 || account.initialBalance > 0
@@ -822,7 +825,9 @@ async deleteUser(adminId, userId, reason = null) {
       throw new Error('Impossible de supprimer un utilisateur avec des soldes non nuls');
     }
 
-    // Transaction pour supprimer l'utilisateur et ses données associées
+    console.log('🚀 [SERVICE] Début transaction de suppression');
+
+    // Transaction simplifiée pour supprimer l'utilisateur
     const result = await prisma.$transaction(async (tx) => {
       // Supprimer les comptes
       await tx.account.deleteMany({
@@ -834,44 +839,15 @@ async deleteUser(adminId, userId, reason = null) {
         where: { userId: userId }
       });
 
-      // Créer une transaction d'audit avant suppression
-      const auditTransaction = await tx.transaction.create({
-        data: {
-          montant: BigInt(0),
-          type: 'AUDIT_SUPPRESSION',
-          description: `Suppression utilisateur: ${userToDelete.nomComplet} (${userToDelete.telephone}) par admin${reason ? ` - Raison: ${reason}` : ''}`,
-          envoyeurId: adminId,
-          destinataireId: adminId, // Admin comme destinataire de l'audit
-          metadata: JSON.stringify({
-            action: 'DELETE_USER',
-            deletedUser: {
-              id: userToDelete.id,
-              telephone: userToDelete.telephone,
-              nomComplet: userToDelete.nomComplet,
-              role: userToDelete.role,
-              status: userToDelete.status
-            },
-            deletedBy: adminId,
-            deletedAt: new Date().toISOString(),
-            reason: reason || 'Aucune raison spécifiée',
-            hadTransactions: hasTransactions,
-            hadBalance: hasBalance
-          })
-        }
-      });
-
       // Supprimer l'utilisateur
       const deletedUser = await tx.user.delete({
         where: { id: userId }
       });
 
-      return {
-        deletedUser,
-        auditId: auditTransaction.id,
-        hadTransactions,
-        hadBalance
-      };
+      return { deletedUser };
     });
+
+    console.log('✅ [SERVICE] Suppression réussie');
 
     return {
       message: `Utilisateur ${userToDelete.nomComplet} supprimé avec succès`,
@@ -880,19 +856,11 @@ async deleteUser(adminId, userId, reason = null) {
         nomComplet: result.deletedUser.nomComplet,
         telephone: result.deletedUser.telephone,
         role: result.deletedUser.role
-      },
-      audit: {
-        id: result.auditId,
-        reason: reason || 'Suppression administrative'
-      },
-      warnings: {
-        hadTransactions: result.hadTransactions,
-        hadBalance: result.hadBalance
       }
     };
 
   } catch (error) {
-    console.error('Erreur deleteUser service:', error);
+    console.error('❌ [SERVICE] Erreur deleteUser:', error.message);
     throw error;
   }
 }

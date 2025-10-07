@@ -1,13 +1,13 @@
-// src/controllers/AccountLineController.js
+// src/controllers/AccountLineController.js - VERSION COMPLÈTE CORRIGÉE
 import prisma from '../config/database.js';
+import NotificationService from '../services/NotificationService.js';
 
 class AccountLineController {
   
-  // Supprimer une ligne de compte (début ou sortie)
-  async deleteAccountLine(req, res) {
+  deleteAccountLine = async (req, res) => {
     try {
-      const { supervisorId, lineType } = req.params; // lineType: 'debut' ou 'sortie'
-      const { accountKey } = req.body; // Ex: 'LIQUIDE', 'ORANGE_MONEY', 'part-nomPartenaire'
+      const { supervisorId, lineType } = req.params;
+      const { accountKey } = req.body;
       const userId = req.user.id;
 
       console.log('🗑️ [CONTROLLER] deleteAccountLine:', {
@@ -18,7 +18,6 @@ class AccountLineController {
         userRole: req.user.role
       });
 
-      // Validation des données
       if (!accountKey) {
         return res.status(400).json({
           success: false,
@@ -33,7 +32,6 @@ class AccountLineController {
         });
       }
 
-      // Vérification des permissions
       const permissionCheck = await this.checkDeletePermissions(req.user, supervisorId, accountKey);
       if (!permissionCheck.allowed) {
         return res.status(403).json({
@@ -42,7 +40,6 @@ class AccountLineController {
         });
       }
 
-      // Exécuter la suppression
       const result = await this.executeAccountLineDeletion(
         supervisorId,
         lineType,
@@ -80,84 +77,103 @@ class AccountLineController {
     }
   }
 
-  // Vérifier les permissions de suppression
-  async checkDeletePermissions(user, supervisorId, accountKey) {
+  checkDeletePermissions = async (user, supervisorId, accountKey) => {
     try {
-      // Admin peut tout supprimer
+      console.log('🔍 [PERMISSIONS] Vérification delete permissions:', {
+        userId: user.id,
+        userRole: user.role,
+        supervisorId,
+        accountKey
+      });
+
       if (user.role === 'ADMIN') {
-        return { allowed: true };
+        return { allowed: true, reason: 'Administrateur - accès complet' };
       }
 
-      // Superviseur peut supprimer ses propres lignes seulement
-      if (user.role === 'SUPERVISEUR') {
-        if (user.id !== supervisorId) {
-          return { 
-            allowed: false, 
-            reason: 'Vous ne pouvez supprimer que vos propres comptes' 
-          };
-        }
-
-        // Ne peut pas supprimer UV_MASTER
-        if (accountKey === 'UV_MASTER') {
-          return { 
-            allowed: false, 
-            reason: 'Impossible de supprimer le compte UV_MASTER' 
-          };
-        }
-
-        // Vérifier si la ligne a des transactions récentes (< 24h)
-        const hasRecentTransactions = await this.checkRecentTransactions(supervisorId, accountKey);
-        if (hasRecentTransactions) {
-          return { 
-            allowed: false, 
-            reason: 'Impossible de supprimer un compte avec des transactions récentes (< 24h)' 
-          };
-        }
-
-        return { allowed: true };
+      if (user.role !== 'SUPERVISEUR') {
+        return { allowed: false, reason: 'Permissions insuffisantes' };
       }
 
-      return { 
-        allowed: false, 
-        reason: 'Permissions insuffisantes' 
-      };
+      if (user.id !== supervisorId) {
+        return { allowed: false, reason: 'Vous ne pouvez supprimer que vos propres comptes' };
+      }
+
+      if (accountKey === 'UV_MASTER') {
+        return { allowed: false, reason: 'Impossible de supprimer le compte UV_MASTER' };
+      }
+
+      const timeCheck = await this.checkRecentTransactions(supervisorId, accountKey);
+      if (timeCheck && timeCheck.blocked) {
+        return { 
+          allowed: false, 
+          reason: timeCheck.reason 
+        };
+      }
+
+      if (accountKey.startsWith('part-')) {
+        const hasOwnDebutTransactions = await this.checkSupervisorOwnTransactions(supervisorId, accountKey, 'debut');
+        const hasOwnSortieTransactions = await this.checkSupervisorOwnTransactions(supervisorId, accountKey, 'sortie');
+        
+        if (!hasOwnDebutTransactions && !hasOwnSortieTransactions) {
+          return { 
+            allowed: false, 
+            reason: 'Vous ne pouvez supprimer que les transactions que vous avez créées' 
+          };
+        }
+      } else {
+        const hasOwnTransactions = await this.checkAccountOwnership(supervisorId, accountKey, 'any');
+        
+        if (!hasOwnTransactions) {
+          return { 
+            allowed: false, 
+            reason: 'Vous ne pouvez supprimer que les comptes créés par vos propres transactions' 
+          };
+        }
+      }
+
+      return { allowed: true, reason: 'Superviseur - peut supprimer dans la fenêtre autorisée' };
 
     } catch (error) {
-      console.error('Erreur checkDeletePermissions:', error);
-      return { 
-        allowed: false, 
-        reason: 'Erreur lors de la vérification des permissions' 
-      };
+      console.error('❌ [PERMISSIONS] Erreur checkDeletePermissions:', error);
+      return { allowed: false, reason: 'Erreur lors de la vérification des permissions' };
     }
   }
 
-  // Vérifier s'il y a des transactions récentes
-  async checkRecentTransactions(supervisorId, accountKey) {
+  checkRecentTransactions = async (supervisorId, accountKey) => {
     try {
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
+      const now = new Date();
 
-      let transactionCount = 0;
+      console.log('🕐 [PERMISSIONS] Vérification fenêtre de suppression autorisée (1-30 min)');
+
+      let lastTransaction = null;
 
       if (accountKey.startsWith('part-')) {
-        // Pour les partenaires, vérifier les transactions DEPOT/RETRAIT
         const partnerName = accountKey.replace('part-', '');
         const partner = await prisma.user.findFirst({
           where: { nomComplet: partnerName, role: 'PARTENAIRE' }
         });
 
         if (partner) {
-          transactionCount = await prisma.transaction.count({
+          const recentTransactions = await prisma.transaction.findMany({
             where: {
               partenaireId: partner.id,
               destinataireId: supervisorId,
-              createdAt: { gte: yesterday },
-              type: { in: ['DEPOT', 'RETRAIT'] }
-            }
+              type: { in: ['DEPOT', 'RETRAIT'] },
+              OR: [
+                { archived: { equals: false } },
+                { archived: { equals: null } }
+              ]
+            },
+            select: { id: true, createdAt: true, type: true },
+            orderBy: { createdAt: 'desc' },
+            take: 1
           });
+
+          if (recentTransactions.length > 0) {
+            lastTransaction = recentTransactions[0];
+          }
         }
       } else {
-        // Pour les comptes standards
         const account = await prisma.account.findFirst({
           where: {
             userId: supervisorId,
@@ -166,25 +182,165 @@ class AccountLineController {
         });
 
         if (account) {
-          transactionCount = await prisma.transaction.count({
+          const recentTransactions = await prisma.transaction.findMany({
             where: {
               compteDestinationId: account.id,
-              createdAt: { gte: yesterday }
-            }
+              type: { 
+                in: ['DEPOT', 'RETRAIT', 'DEBUT_JOURNEE', 'FIN_JOURNEE'] 
+              }
+            },
+            select: { id: true, createdAt: true, type: true },
+            orderBy: { createdAt: 'desc' },
+            take: 1
           });
+
+          if (recentTransactions.length > 0) {
+            lastTransaction = recentTransactions[0];
+          }
         }
       }
 
-      return transactionCount > 0;
+      if (!lastTransaction) {
+        console.log('✅ [PERMISSIONS] Aucune transaction trouvée - suppression autorisée');
+        return false;
+      }
+
+      const transactionTime = new Date(lastTransaction.createdAt);
+      const ageInMinutes = Math.floor((now.getTime() - transactionTime.getTime()) / (1000 * 60));
+
+      console.log(`⏰ [PERMISSIONS] Dernière transaction il y a ${ageInMinutes} minute(s)`);
+      
+      if (ageInMinutes < 1) {
+        console.log('❌ [PERMISSIONS] Blocage : transaction trop récente (< 1 min)');
+        return {
+          blocked: true,
+          reason: 'Transaction créée il y a moins d\'1 minute. Attendez au moins 1 minute pour éviter les suppressions accidentelles.',
+          ageInMinutes
+        };
+      }
+
+      if (ageInMinutes > 30) {
+        console.log('❌ [PERMISSIONS] Blocage : transaction trop ancienne (> 30 min)');
+        return {
+          blocked: true,
+          reason: 'La dernière transaction date de plus de 30 minutes. Les suppressions ne sont autorisées que dans les 30 minutes suivant une transaction.',
+          ageInMinutes
+        };
+      }
+
+      console.log('✅ [PERMISSIONS] Fenêtre de correction autorisée (1-30 min)');
+      return false;
 
     } catch (error) {
-      console.error('Erreur checkRecentTransactions:', error);
-      return true; // Par sécurité, bloquer la suppression en cas d'erreur
+      console.error('❌ [PERMISSIONS] Erreur checkRecentTransactions:', error);
+      return false;
     }
   }
 
-  // Exécuter la suppression de ligne de compte
-  async executeAccountLineDeletion(supervisorId, lineType, accountKey, deletedBy) {
+  checkSupervisorOwnTransactions = async (supervisorId, accountKey, lineType) => {
+    try {
+      const partnerName = accountKey.replace('part-', '');
+      const transactionType = lineType === 'debut' ? 'DEPOT' : 'RETRAIT';
+
+      const partner = await prisma.user.findFirst({
+        where: { 
+          nomComplet: partnerName, 
+          role: 'PARTENAIRE',
+          status: 'ACTIVE'
+        }
+      });
+
+      if (!partner) {
+        console.log(`⚠️ [PERMISSIONS] Partenaire "${partnerName}" non trouvé`);
+        return false;
+      }
+
+      const ownTransactions = await prisma.transaction.count({
+        where: {
+          partenaireId: partner.id,
+          destinataireId: supervisorId,
+          type: transactionType,
+          envoyeurId: supervisorId,
+          OR: [
+            { archived: { equals: false } },
+            { archived: { equals: null } }
+          ]
+        }
+      });
+
+      console.log(`🔍 [PERMISSIONS] Transactions ${transactionType} créées par superviseur ${supervisorId} pour ${partnerName}: ${ownTransactions}`);
+      
+      return ownTransactions > 0;
+
+    } catch (error) {
+      console.error('❌ [PERMISSIONS] Erreur checkSupervisorOwnTransactions:', error);
+      return false;
+    }
+  }
+
+  checkAccountOwnership = async (supervisorId, accountKey, lineType) => {
+    try {
+      const account = await prisma.account.findFirst({
+        where: {
+          userId: supervisorId,
+          type: accountKey
+        }
+      });
+
+      if (!account) {
+        console.log(`⚠️ [PERMISSIONS] Compte ${accountKey} non trouvé pour superviseur ${supervisorId}`);
+        return false;
+      }
+
+      const ownTransactions = await prisma.transaction.count({
+        where: {
+          compteDestinationId: account.id,
+          envoyeurId: supervisorId,
+          type: { 
+            in: ['DEPOT', 'RETRAIT', 'DEBUT_JOURNEE', 'FIN_JOURNEE'] 
+          }
+        }
+      });
+
+      console.log(`🔍 [PERMISSIONS] Transactions propres pour compte ${accountKey}: ${ownTransactions}`);
+
+      if (ownTransactions === 0) {
+        const allTransactions = await prisma.transaction.count({
+          where: {
+            compteDestinationId: account.id
+          }
+        });
+
+        if (allTransactions === 0) {
+          console.log(`ℹ️ [PERMISSIONS] Compte ${accountKey} sans transactions - autorisation`);
+          return true;
+        }
+
+        const auditTransactions = await prisma.transaction.count({
+          where: {
+            compteDestinationId: account.id,
+            type: { in: ['AUDIT_SUPPRESSION', 'AUDIT_MODIFICATION'] }
+          }
+        });
+
+        if (auditTransactions === allTransactions) {
+          console.log(`ℹ️ [PERMISSIONS] Compte ${accountKey} avec seulement des audits - autorisation`);
+          return true;
+        }
+
+        console.log(`❌ [PERMISSIONS] Compte ${accountKey} a des transactions créées par d'autres`);
+        return false;
+      }
+
+      return true;
+
+    } catch (error) {
+      console.error('❌ [PERMISSIONS] Erreur checkAccountOwnership:', error);
+      return false;
+    }
+  }
+
+  executeAccountLineDeletion = async (supervisorId, lineType, accountKey, deletedBy) => {
     try {
       console.log('🗑️ [CONTROLLER] executeAccountLineDeletion:', {
         supervisorId,
@@ -193,7 +349,6 @@ class AccountLineController {
         deletedBy
       });
 
-      // Vérifier que le superviseur existe
       const supervisor = await prisma.user.findUnique({
         where: { id: supervisorId, role: 'SUPERVISEUR' }
       });
@@ -203,13 +358,10 @@ class AccountLineController {
       }
 
       let result = {};
-      let oldValue = 0;
 
       if (accountKey.startsWith('part-')) {
-        // Suppression d'une ligne partenaire
         result = await this.deletePartnerAccountLine(supervisorId, lineType, accountKey, deletedBy);
       } else {
-        // Suppression d'un compte standard
         const account = await prisma.account.findFirst({
           where: {
             userId: supervisorId,
@@ -221,8 +373,7 @@ class AccountLineController {
           throw new Error(`Compte ${accountKey} non trouvé`);
         }
 
-        // Sauvegarder l'ancienne valeur
-        oldValue = lineType === 'debut' 
+        const oldValue = lineType === 'debut' 
           ? Number(account.initialBalance) / 100 
           : Number(account.balance) / 100;
 
@@ -230,12 +381,11 @@ class AccountLineController {
           throw new Error('Cette ligne est déjà à zéro, rien à supprimer');
         }
 
-        // Mettre à jour le compte
         const updateData = {};
         if (lineType === 'debut') {
-          updateData.initialBalance = 0;
+          updateData.initialBalance = 0n;
         } else {
-          updateData.balance = 0;
+          updateData.balance = 0n;
         }
 
         await prisma.account.update({
@@ -243,10 +393,9 @@ class AccountLineController {
           data: updateData
         });
 
-        // Créer une transaction d'audit
         await prisma.transaction.create({
           data: {
-            montant: Math.round(oldValue * 100),
+            montant: BigInt(Math.round(oldValue * 100)),
             type: 'AUDIT_SUPPRESSION',
             description: `Suppression ligne ${accountKey} (${lineType}) - Valeur supprimée: ${oldValue} F`,
             envoyeurId: deletedBy,
@@ -262,6 +411,13 @@ class AccountLineController {
               reason: 'Suppression manuelle depuis le dashboard'
             })
           }
+        });
+
+        await NotificationService.createNotification({
+          userId: supervisorId,
+          title: 'Ligne de compte supprimée',
+          message: `Votre ligne ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) de ${oldValue} F a été supprimée`,
+          type: 'AUDIT_SUPPRESSION'
         });
 
         result = {
@@ -288,95 +444,168 @@ class AccountLineController {
     }
   }
 
-  // Suppression d'une ligne partenaire
-  async deletePartnerAccountLine(supervisorId, lineType, accountKey, deletedBy) {
+  deletePartnerAccountLine = async (supervisorId, lineType, accountKey, deletedBy) => {
     try {
+      console.log('🗑️ [PARTNER DELETE] Début suppression:', { supervisorId, lineType, accountKey, deletedBy });
+
       const partnerName = accountKey.replace('part-', '');
       
-      // Trouver le partenaire
-      const partner = await prisma.user.findFirst({
-        where: { nomComplet: partnerName, role: 'PARTENAIRE' }
-      });
-
-      if (!partner) {
-        throw new Error(`Partenaire ${partnerName} non trouvé`);
-      }
-
-      // Calculer la valeur à supprimer
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
-
       const transactionType = lineType === 'debut' ? 'DEPOT' : 'RETRAIT';
-      
-      const transactions = await prisma.transaction.findMany({
-        where: {
-          partenaireId: partner.id,
-          destinataireId: supervisorId,
-          type: transactionType,
-          createdAt: { gte: yesterday }
-        }
+
+      const partnersWithSameName = await prisma.user.findMany({
+        where: { 
+          nomComplet: partnerName, 
+          role: 'PARTENAIRE',
+          status: 'ACTIVE'
+        },
+        select: { id: true, nomComplet: true, telephone: true }
       });
 
+      console.log(`🔍 [PARTNER DELETE] ${partnersWithSameName.length} partenaire(s) trouvé(s) avec le nom "${partnerName}"`);
+
+      if (partnersWithSameName.length === 0) {
+        throw new Error(`Partenaire "${partnerName}" non trouvé`);
+      }
+
+      let targetPartner = null;
+      let transactions = [];
+
+      if (partnersWithSameName.length === 1) {
+        targetPartner = partnersWithSameName[0];
+      } else {
+        console.log('⚠️ [PARTNER DELETE] Plusieurs partenaires avec le même nom, recherche du bon partenaire...');
+        
+        for (const partner of partnersWithSameName) {
+          const partnerTransactions = await prisma.transaction.findMany({
+            where: {
+              partenaireId: partner.id,
+              destinataireId: supervisorId,
+              type: transactionType,
+              createdAt: { gte: yesterday },
+              OR: [
+                { archived: { equals: false } },
+                { archived: { equals: null } }
+              ]
+            }
+          });
+
+          if (partnerTransactions.length > 0) {
+            targetPartner = partner;
+            transactions = partnerTransactions;
+            console.log(`✅ [PARTNER DELETE] Partenaire trouvé: ${partner.nomComplet} (${partner.telephone}) avec ${partnerTransactions.length} transaction(s)`);
+            break;
+          }
+        }
+
+        if (!targetPartner) {
+          console.log('⚠️ [PARTNER DELETE] Aucun partenaire avec transactions récentes, prise du premier');
+          targetPartner = partnersWithSameName[0];
+        }
+      }
+
       if (transactions.length === 0) {
-        throw new Error(`Aucune transaction ${transactionType} récente trouvée pour ${partnerName}`);
+        transactions = await prisma.transaction.findMany({
+          where: {
+            partenaireId: targetPartner.id,
+            destinataireId: supervisorId,
+            type: transactionType,
+            createdAt: { gte: yesterday },
+            OR: [
+              { archived: { equals: false } },
+              { archived: { equals: null } }
+            ]
+          },
+          orderBy: { createdAt: 'desc' }
+        });
+      }
+
+      console.log(`📊 [PARTNER DELETE] ${transactions.length} transaction(s) ${transactionType} trouvée(s) pour ${targetPartner.nomComplet}`);
+
+      if (transactions.length === 0) {
+        throw new Error(`Aucune transaction ${transactionType} récente trouvée pour ${partnerName}${partnersWithSameName.length > 1 ? ` (ID: ${targetPartner.id})` : ''}`);
       }
 
       const totalValue = transactions.reduce((sum, tx) => sum + Number(tx.montant), 0) / 100;
+      
+      console.log(`💰 [PARTNER DELETE] Valeur totale à supprimer: ${totalValue} F`);
 
-      // Supprimer les transactions (ou les marquer comme supprimées)
-      for (const transaction of transactions) {
-        await prisma.transaction.update({
+      const updatePromises = transactions.map(transaction => 
+        prisma.transaction.update({
           where: { id: transaction.id },
           data: {
             description: `[SUPPRIMÉ] ${transaction.description}`,
+            archived: true,
+            archivedAt: new Date(),
             metadata: JSON.stringify({
               deleted: true,
               deletedBy,
               deletedAt: new Date().toISOString(),
-              originalDescription: transaction.description
+              originalDescription: transaction.description,
+              deletionReason: 'Suppression ligne partenaire depuis dashboard'
             })
           }
-        });
-      }
+        })
+      );
 
-      // Créer une transaction d'audit
+      await Promise.all(updatePromises);
+      console.log(`✅ [PARTNER DELETE] ${transactions.length} transaction(s) marquées comme supprimées`);
+
       await prisma.transaction.create({
         data: {
-          montant: Math.round(totalValue * 100),
+          montant: BigInt(Math.round(totalValue * 100)),
           type: 'AUDIT_SUPPRESSION',
-          description: `Suppression transactions partenaire ${partnerName} (${lineType}) - ${transactions.length} transaction(s)`,
+          description: `Suppression transactions partenaire ${partnerName} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F`,
           envoyeurId: deletedBy,
           destinataireId: supervisorId,
-          partenaireId: partner.id,
+          partenaireId: targetPartner.id,
           metadata: JSON.stringify({
             action: 'DELETE_PARTNER_TRANSACTIONS',
             lineType,
-            partnerName,
+            partnerName: targetPartner.nomComplet,
+            partnerId: targetPartner.id,
+            partnerPhone: targetPartner.telephone,
             transactionCount: transactions.length,
             totalValue,
+            transactionType,
             transactionIds: transactions.map(t => t.id),
             deletedBy,
-            deletedAt: new Date().toISOString()
+            deletedAt: new Date().toISOString(),
+            duplicateNamesFound: partnersWithSameName.length > 1
           })
         }
       });
 
-      return {
-        partnerName,
+      await NotificationService.createNotification({
+        userId: supervisorId,
+        title: 'Transactions partenaire supprimées',
+        message: `${transactions.length} transaction(s) ${transactionType} de ${partnerName} (${totalValue} F) ont été supprimées`,
+        type: 'AUDIT_SUPPRESSION'
+      });
+
+      const result = {
+        partnerName: targetPartner.nomComplet,
+        partnerId: targetPartner.id,
+        partnerPhone: targetPartner.telephone,
         lineType,
+        transactionType,
         transactionsDeleted: transactions.length,
         oldValue: totalValue,
-        newValue: 0
+        newValue: 0,
+        duplicateNamesHandled: partnersWithSameName.length > 1
       };
 
+      console.log('✅ [PARTNER DELETE] Suppression terminée avec succès:', result);
+      return result;
+
     } catch (error) {
-      console.error('❌ Erreur deletePartnerAccountLine:', error);
+      console.error('❌ [PARTNER DELETE] Erreur deletePartnerAccountLine:', error);
       throw error;
     }
   }
 
-  // Réinitialiser une ligne de compte (remettre à zéro)
-  async resetAccountLine(req, res) {
+  resetAccountLine = async (req, res) => {
     try {
       const { supervisorId, lineType } = req.params;
       const { accountKey, newValue = 0 } = req.body;
@@ -387,10 +616,10 @@ class AccountLineController {
         lineType,
         accountKey,
         newValue,
-        userId
+        userId,
+        userRole: req.user.role
       });
 
-      // Vérifications de base
       if (!accountKey) {
         return res.status(400).json({
           success: false,
@@ -405,40 +634,53 @@ class AccountLineController {
         });
       }
 
-      // Permissions (admin seulement pour reset)
-      if (req.user.role !== 'ADMIN') {
+      const resetPermission = await this.checkResetPermissions(req.user, supervisorId, accountKey, lineType);
+      if (!resetPermission.allowed) {
         return res.status(403).json({
           success: false,
-          message: 'Seuls les administrateurs peuvent réinitialiser les comptes'
+          message: resetPermission.reason
         });
       }
 
-      // Trouver et mettre à jour le compte
-      const account = await prisma.account.findFirst({
-        where: {
-          userId: supervisorId,
-          type: accountKey
-        }
+      const supervisor = await prisma.user.findUnique({
+        where: { id: supervisorId, role: 'SUPERVISEUR' }
       });
 
-      if (!account) {
+      if (!supervisor) {
         return res.status(404).json({
           success: false,
-          message: `Compte ${accountKey} non trouvé`
+          message: 'Superviseur non trouvé'
         });
       }
+
+      const newValueCentimes = Math.round(newValue * 100);
+
+      const account = await prisma.account.upsert({
+        where: {
+          userId_type: {
+            userId: supervisorId,
+            type: accountKey
+          }
+        },
+        update: {},
+        create: {
+          type: accountKey,
+          userId: supervisorId,
+          balance: 0n,
+          initialBalance: 0n,
+          previousInitialBalance: 0n
+        }
+      });
 
       const oldValue = lineType === 'debut' 
         ? Number(account.initialBalance) / 100 
         : Number(account.balance) / 100;
 
-      const newValueCentimes = Math.round(newValue * 100);
-
       const updateData = {};
       if (lineType === 'debut') {
-        updateData.initialBalance = newValueCentimes;
+        updateData.initialBalance = BigInt(newValueCentimes);
       } else {
-        updateData.balance = newValueCentimes;
+        updateData.balance = BigInt(newValueCentimes);
       }
 
       await prisma.account.update({
@@ -446,12 +688,11 @@ class AccountLineController {
         data: updateData
       });
 
-      // Audit de la réinitialisation
       await prisma.transaction.create({
         data: {
-          montant: newValueCentimes,
+          montant: BigInt(Math.abs(newValueCentimes)),
           type: 'AUDIT_MODIFICATION',
-          description: `Réinitialisation ${accountKey} (${lineType}) - ${oldValue} F → ${newValue} F`,
+          description: `Réinitialisation ${accountKey} (${lineType}) par ${req.user.role} - ${oldValue} F → ${newValue} F`,
           envoyeurId: userId,
           destinataireId: supervisorId,
           compteDestinationId: account.id,
@@ -462,9 +703,19 @@ class AccountLineController {
             oldValue,
             newValue,
             resetBy: userId,
-            resetAt: new Date().toISOString()
+            resetByRole: req.user.role,
+            resetAt: new Date().toISOString(),
+            hasOwnTransactions: resetPermission.hasOwnTransactions,
+            accountCreated: account.createdAt.getTime() === account.updatedAt.getTime()
           })
         }
+      });
+
+      await NotificationService.createNotification({
+        userId: supervisorId,
+        title: 'Compte réinitialisé',
+        message: `Votre compte ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) a été réinitialisé de ${oldValue} F à ${newValue} F${req.user.role === 'ADMIN' ? ' par un administrateur' : ''}`,
+        type: 'AUDIT_MODIFICATION'
       });
 
       res.json({
@@ -475,12 +726,30 @@ class AccountLineController {
           lineType,
           oldValue,
           newValue,
-          resetAt: new Date()
+          resetAt: new Date(),
+          resetBy: req.user.role,
+          hasOwnTransactions: resetPermission.hasOwnTransactions,
+          supervisor: supervisor.nomComplet
         }
       });
 
     } catch (error) {
       console.error('❌ [CONTROLLER] Erreur resetAccountLine:', error);
+      
+      if (error.code === 'P2002') {
+        return res.status(400).json({
+          success: false,
+          message: 'Conflit lors de la création/mise à jour du compte'
+        });
+      }
+
+      if (error.code === 'P2025') {
+        return res.status(404).json({
+          success: false,
+          message: 'Enregistrement non trouvé'
+        });
+      }
+      
       res.status(500).json({
         success: false,
         message: error.message || 'Erreur lors de la réinitialisation'
@@ -488,8 +757,93 @@ class AccountLineController {
     }
   }
 
-  // Obtenir l'historique des suppressions
-  async getAccountDeletionHistory(req, res) {
+  checkResetPermissions = async (user, supervisorId, accountKey, lineType) => {
+    try {
+      console.log('🔍 [PERMISSIONS] Vérification reset permissions:', {
+        userId: user.id,
+        userRole: user.role,
+        supervisorId,
+        accountKey,
+        lineType
+      });
+
+      if (user.role === 'ADMIN') {
+        return { 
+          allowed: true, 
+          hasOwnTransactions: false,
+          reason: 'Administrateur - accès complet' 
+        };
+      }
+
+      if (user.role !== 'SUPERVISEUR') {
+        return { 
+          allowed: false, 
+          hasOwnTransactions: false,
+          reason: 'Permissions insuffisantes' 
+        };
+      }
+
+      if (user.id !== supervisorId) {
+        return { 
+          allowed: false, 
+          hasOwnTransactions: false,
+          reason: 'Vous ne pouvez réinitialiser que vos propres comptes' 
+        };
+      }
+
+      const timeCheck = await this.checkRecentTransactions(supervisorId, accountKey);
+      if (timeCheck && timeCheck.blocked) {
+        return { 
+          allowed: false, 
+          hasOwnTransactions: false,
+          reason: timeCheck.reason 
+        };
+      }
+
+      if (accountKey.startsWith('part-')) {
+        const hasOwnTransactions = await this.checkSupervisorOwnTransactions(supervisorId, accountKey, lineType);
+        
+        if (!hasOwnTransactions) {
+          return { 
+            allowed: false, 
+            hasOwnTransactions: false,
+            reason: 'Vous ne pouvez modifier que les transactions que vous avez créées' 
+          };
+        }
+
+        return { 
+          allowed: true, 
+          hasOwnTransactions: true,
+          reason: 'Superviseur - peut modifier ses propres transactions partenaires' 
+        };
+      }
+
+      const hasOwnTransactions = await this.checkAccountOwnership(supervisorId, accountKey, lineType);
+      
+      if (!hasOwnTransactions) {
+        return { 
+          allowed: false, 
+          hasOwnTransactions: false,
+          reason: 'Vous ne pouvez modifier que les comptes créés par vos propres transactions' 
+        };
+      }
+
+      return { 
+        allowed: true, 
+        hasOwnTransactions: true,
+        reason: 'Superviseur - peut modifier ses propres comptes' 
+      };
+
+    } catch (error) {
+      console.error('❌ [PERMISSIONS] Erreur checkResetPermissions:', error);
+      return { 
+        allowed: false, 
+        hasOwnTransactions: false,
+        reason: 'Erreur lors de la vérification des permissions' 
+      };
+    }
+  }
+  getAccountDeletionHistory = async (req, res) => {
     try {
       if (req.user.role !== 'ADMIN') {
         return res.status(403).json({
@@ -497,17 +851,17 @@ class AccountLineController {
           message: 'Accès réservé aux administrateurs'
         });
       }
-
+  
       const { page = 1, limit = 20, supervisorId } = req.query;
-
+  
       const whereClause = {
-        type: 'AUDIT_SUPPRESSION'
+        type: { in: ['AUDIT_SUPPRESSION', 'AUDIT_MODIFICATION'] }
       };
-
+  
       if (supervisorId) {
         whereClause.destinataireId = supervisorId;
       }
-
+  
       const [auditRecords, totalCount] = await Promise.all([
         prisma.transaction.findMany({
           where: whereClause,
@@ -522,18 +876,19 @@ class AccountLineController {
         }),
         prisma.transaction.count({ where: whereClause })
       ]);
-
+  
       const formattedHistory = auditRecords.map(record => ({
         id: record.id,
+        type: record.type,
         description: record.description,
         createdAt: record.createdAt,
-        deletedBy: record.envoyeur.nomComplet,
+        executedBy: record.envoyeur.nomComplet,
         superviseur: record.destinataire.nomComplet,
         partenaire: record.partenaire?.nomComplet || null,
         montant: Number(record.montant) / 100,
         metadata: record.metadata ? JSON.parse(record.metadata) : null
       }));
-
+  
       res.json({
         success: true,
         message: `${auditRecords.length} enregistrement(s) trouvé(s)`,
@@ -547,7 +902,7 @@ class AccountLineController {
           }
         }
       });
-
+  
     } catch (error) {
       console.error('❌ [CONTROLLER] Erreur getAccountDeletionHistory:', error);
       res.status(500).json({
@@ -555,7 +910,7 @@ class AccountLineController {
         message: 'Erreur lors de la récupération de l\'historique'
       });
     }
-  }
+  } // <- Vérifiez que cette accolade est bien présente
 }
 
 export default new AccountLineController();
