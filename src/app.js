@@ -10,7 +10,6 @@ import userRoutes from './routes/userRoutes.js';
 import TransactionRoute from './routes/transactionRoutes.js';
 import RecentTransactionRoutes from './routes/recentTransactionRoutes.js';
 import AccountLines from './routes/accountLines.js';
-import cronHandler from '../api/cron.js';
 
 const app = express();
 
@@ -186,16 +185,6 @@ app.get('/api/test-auth', (req, res) => {
   });
 });
 
-app.post('/', (req, res) => {
-  res.json({
-    message: 'SBK API Server - POST OK',
-    status: 'OK',
-    timestamp: new Date().toISOString()
-  });
-});
-
-
-app.post('/api/cron', cronHandler);
 // Route 404
 app.use('*', (req, res) => {
   console.log(`❌ Route non trouvée: ${req.method} ${req.path}`);

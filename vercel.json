@@ -5,7 +5,13 @@
     { "src": "api/cron.js", "use": "@vercel/node" }
   ],
   "routes": [
-    { "src": "/api/cron", "dest": "api/cron.js" },
-    { "src": "/(.*)", "dest": "server.js" }
+    {
+      "src": "/api/cron",
+      "dest": "api/cron.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "server.js"
+    }
   ]
 }
