@@ -8,7 +8,7 @@ class TransactionService {
   // =====================================
  static RESET_CONFIG = {
   hour: 1,
-  minute: 26,
+  minute: 45,
   windowMinutes: 0
 };
 
