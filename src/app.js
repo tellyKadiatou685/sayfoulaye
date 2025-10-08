@@ -186,6 +186,15 @@ app.get('/api/test-auth', (req, res) => {
   });
 });
 
+app.post('/', (req, res) => {
+  res.json({
+    message: 'SBK API Server - POST OK',
+    status: 'OK',
+    timestamp: new Date().toISOString()
+  });
+});
+
+
 app.post('/api/cron', cronHandler);
 // Route 404
 app.use('*', (req, res) => {
