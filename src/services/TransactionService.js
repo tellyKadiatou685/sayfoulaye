@@ -2567,8 +2567,451 @@ async forceReset(adminId = 'vercel-cron') {
   }
 
   // =====================================
-  // MÉTHODES DE DEBUG ET DIAGNOSTIC
-  // =====================================
+// EXPORT EXCEL DES DONNÉES
+// =====================================
+// À AJOUTER à la fin de votre TransactionService.js, juste avant : export default new TransactionService();
+
+async exportDailyDataToExcel(period = 'today', customDate = null) {
+  try {
+    console.log(`📊 [EXPORT EXCEL] Génération du fichier pour la période: ${period}`);
+    
+    // Récupérer les données du dashboard
+    const dashboardData = await this.getAdminDashboard(period, customDate);
+    
+    if (!dashboardData || !dashboardData.supervisorCards) {
+      throw new Error('Aucune donnée disponible pour l\'export');
+    }
+    
+    // Créer un workbook (classeur)
+    const XLSX = require('xlsx');
+    const workbook = XLSX.utils.book_new();
+    
+    // ========================================
+    // FEUILLE 1 : RÉSUMÉ GLOBAL
+    // ========================================
+    const summaryData = [
+      ['RÉSUMÉ GLOBAL', ''],
+      ['Période', this.getPeriodLabel(period, customDate)],
+      ['Date d\'export', new Date().toLocaleString('fr-FR')],
+      ['Heure du reset', `${dashboardData.dynamicConfig.resetConfig.hour}:${dashboardData.dynamicConfig.resetConfig.minute.toString().padStart(2, '0')}`],
+      ['', ''],
+      ['TOTAUX GLOBAUX', ''],
+      ['Début total', dashboardData.globalTotals.formatted.debutTotalGlobal],
+      ['Sortie total', dashboardData.globalTotals.formatted.sortieTotalGlobal],
+      ['GR Total', dashboardData.globalTotals.formatted.grTotalGlobal],
+      ['', ''],
+      ['UV MASTER GLOBAL', ''],
+      ['Solde', dashboardData.globalTotals.uvMaster.formatted.solde],
+      ['Sorties', dashboardData.globalTotals.uvMaster.formatted.sorties]
+    ];
+    
+    const summarySheet = XLSX.utils.aoa_to_sheet(summaryData);
+    summarySheet['!cols'] = [{ wch: 25 }, { wch: 25 }];
+    XLSX.utils.book_append_sheet(workbook, summarySheet, 'Résumé');
+    
+    // ========================================
+    // FEUILLE 2 : DÉTAIL PAR SUPERVISEUR
+    // ========================================
+    const supervisorDetailData = [
+      ['DÉTAIL PAR SUPERVISEUR', '', '', '', '', '', ''],
+      ['Superviseur', 'Type Compte', 'Début', 'Sortie', 'GR', 'Statut', 'Observation']
+    ];
+    
+    dashboardData.supervisorCards.forEach(supervisor => {
+      // En-tête superviseur
+      supervisorDetailData.push([supervisor.nom, '', '', '', '', supervisor.status, '']);
+      
+      // Comptes du superviseur
+      const allAccountTypes = new Set([
+        ...Object.keys(supervisor.comptes.debut),
+        ...Object.keys(supervisor.comptes.sortie)
+      ]);
+      
+      Array.from(allAccountTypes).sort().forEach(accountType => {
+        const debut = supervisor.comptes.debut[accountType] || 0;
+        const sortie = supervisor.comptes.sortie[accountType] || 0;
+        const gr = sortie - debut;
+        
+        let accountLabel = accountType;
+        if (accountType.startsWith('part-')) {
+          accountLabel = `Partenaire: ${accountType.substring(5)}`;
+        } else {
+          accountLabel = this.getAccountTypeLabel(accountType);
+        }
+        
+        supervisorDetailData.push([
+          '',
+          accountLabel,
+          debut !== 0 ? debut.toLocaleString('fr-FR') : '',
+          sortie !== 0 ? sortie.toLocaleString('fr-FR') : '',
+          gr !== 0 ? gr.toLocaleString('fr-FR') : '',
+          '',
+          ''
+        ]);
+      });
+      
+      // Totaux par superviseur
+      supervisorDetailData.push([
+        '',
+        'TOTAL',
+        supervisor.totaux.debutTotal.toLocaleString('fr-FR'),
+        supervisor.totaux.sortieTotal.toLocaleString('fr-FR'),
+        supervisor.totaux.grTotal.toLocaleString('fr-FR'),
+        '',
+        ''
+      ]);
+      
+      supervisorDetailData.push(['', '', '', '', '', '', '']); // Ligne vide
+    });
+    
+    const supervisorSheet = XLSX.utils.aoa_to_sheet(supervisorDetailData);
+    supervisorSheet['!cols'] = [
+      { wch: 25 },
+      { wch: 25 },
+      { wch: 15 },
+      { wch: 15 },
+      { wch: 15 },
+      { wch: 15 },
+      { wch: 25 }
+    ];
+    XLSX.utils.book_append_sheet(workbook, supervisorSheet, 'Détail Superviseurs');
+    
+    // ========================================
+    // FEUILLE 3 : SYNTHÈSE COMPTES
+    // ========================================
+    const accountSummaryData = [
+      ['SYNTHÈSE PAR TYPE DE COMPTE', '', ''],
+      ['Type de Compte', 'Début Total', 'Sortie Total']
+    ];
+    
+    const accountTotals = {};
+    
+    dashboardData.supervisorCards.forEach(supervisor => {
+      Object.entries(supervisor.comptes.debut).forEach(([accountType, value]) => {
+        if (!accountTotals[accountType]) {
+          accountTotals[accountType] = { debut: 0, sortie: 0 };
+        }
+        accountTotals[accountType].debut += value;
+      });
+      
+      Object.entries(supervisor.comptes.sortie).forEach(([accountType, value]) => {
+        if (!accountTotals[accountType]) {
+          accountTotals[accountType] = { debut: 0, sortie: 0 };
+        }
+        accountTotals[accountType].sortie += value;
+      });
+    });
+    
+    Object.entries(accountTotals).forEach(([accountType, totals]) => {
+      let label = accountType;
+      if (accountType.startsWith('part-')) {
+        label = `Partenaire: ${accountType.substring(5)}`;
+      } else {
+        label = this.getAccountTypeLabel(accountType);
+      }
+      
+      accountSummaryData.push([
+        label,
+        totals.debut.toLocaleString('fr-FR'),
+        totals.sortie.toLocaleString('fr-FR')
+      ]);
+    });
+    
+    const accountSheet = XLSX.utils.aoa_to_sheet(accountSummaryData);
+    accountSheet['!cols'] = [{ wch: 25 }, { wch: 20 }, { wch: 20 }];
+    XLSX.utils.book_append_sheet(workbook, accountSheet, 'Synthèse Comptes');
+    
+    // ========================================
+    // FEUILLE 4 : TRANSACTIONS PARTENAIRES
+    // ========================================
+    const partnerTransactionData = [
+      ['TRANSACTIONS PARTENAIRES', '', '', '', ''],
+      ['Superviseur', 'Partenaire', 'Type', 'Montant', 'Date']
+    ];
+    
+    dashboardData.supervisorCards.forEach(supervisor => {
+      Object.entries(supervisor.comptes.debut).forEach(([partnerKey, value]) => {
+        if (partnerKey.startsWith('part-')) {
+          const partnerName = partnerKey.substring(5);
+          partnerTransactionData.push([
+            supervisor.nom,
+            partnerName,
+            'Dépôt',
+            value.toLocaleString('fr-FR'),
+            new Date().toLocaleDateString('fr-FR')
+          ]);
+        }
+      });
+      
+      Object.entries(supervisor.comptes.sortie).forEach(([partnerKey, value]) => {
+        if (partnerKey.startsWith('part-')) {
+          const partnerName = partnerKey.substring(5);
+          partnerTransactionData.push([
+            supervisor.nom,
+            partnerName,
+            'Retrait',
+            value.toLocaleString('fr-FR'),
+            new Date().toLocaleDateString('fr-FR')
+          ]);
+        }
+      });
+    });
+    
+    const partnerSheet = XLSX.utils.aoa_to_sheet(partnerTransactionData);
+    partnerSheet['!cols'] = [
+      { wch: 25 },
+      { wch: 25 },
+      { wch: 12 },
+      { wch: 15 },
+      { wch: 15 }
+    ];
+    XLSX.utils.book_append_sheet(workbook, partnerSheet, 'Partenaires');
+    
+    // ========================================
+    // GÉNÉRER LE FICHIER
+    // ========================================
+    const fileName = `Export_${period}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    const filePath = `/tmp/${fileName}`;
+    
+    XLSX.writeFile(workbook, filePath);
+    
+    console.log(`✅ [EXPORT EXCEL] Fichier généré: ${filePath}`);
+    
+    return {
+      success: true,
+      fileName,
+      filePath,
+      period,
+      exportDate: new Date().toISOString(),
+      supervisorCount: dashboardData.supervisorCards.length,
+      totalAmount: dashboardData.globalTotals.sortieTotalGlobal
+    };
+    
+  } catch (error) {
+    console.error('❌ [EXPORT EXCEL] Erreur:', error);
+    throw error;
+  }
+}
+
+// Dans TransactionService.js - Méthodes export corrigées
+
+async exportSimpleDailyData(period = 'today', customDate = null) {
+  try {
+    console.log(`📄 [EXPORT SIMPLE] Génération du fichier simple...`);
+    
+    // ✅ IMPORT DYNAMIQUE
+    const XLSX = await import('xlsx');
+    
+    // Récupérer les données
+    const dashboardData = await this.getAdminDashboard(period, customDate);
+    
+    // Créer un tableau simple
+    const data = [];
+    data.push(['EXPORT DONNÉES DU JOUR']);
+    data.push(['Période', this.getPeriodLabel(period, customDate)]);
+    data.push(['Date', new Date().toLocaleString('fr-FR')]);
+    data.push(['']);
+    
+    data.push(['Superviseur', 'Type Compte', 'Début', 'Sortie', 'GR']);
+    
+    dashboardData.supervisorCards.forEach(supervisor => {
+      let isFirst = true;
+      
+      Object.keys(supervisor.comptes.debut).forEach(accountType => {
+        const debut = supervisor.comptes.debut[accountType] || 0;
+        const sortie = supervisor.comptes.sortie[accountType] || 0;
+        const gr = sortie - debut;
+        
+        data.push([
+          isFirst ? supervisor.nom : '',
+          this.getAccountTypeLabel(accountType),
+          debut,
+          sortie,
+          gr
+        ]);
+        
+        isFirst = false;
+      });
+    });
+    
+    data.push(['']);
+    data.push(['TOTAL GLOBAL', '', 
+      dashboardData.globalTotals.debutTotalGlobal,
+      dashboardData.globalTotals.sortieTotalGlobal,
+      dashboardData.globalTotals.grTotalGlobal
+    ]);
+    
+    // ✅ Utiliser XLSX.default ou XLSX selon l'import
+    const xlsxLib = XLSX.default || XLSX;
+    
+    // Créer le worksheet et workbook
+    const ws = xlsxLib.utils.aoa_to_sheet(data);
+    const wb = xlsxLib.utils.book_new();
+    xlsxLib.utils.book_append_sheet(wb, ws, 'Export');
+    
+    // Générer le fichier
+    const fileName = `Export_${period}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    const filePath = `/tmp/${fileName}`;
+    
+    xlsxLib.writeFile(wb, filePath);
+    
+    console.log(`✅ [EXPORT SIMPLE] Fichier généré: ${filePath}`);
+    
+    return {
+      success: true,
+      fileName,
+      filePath,
+      period
+    };
+    
+  } catch (error) {
+    console.error('❌ [EXPORT SIMPLE] Erreur:', error);
+    throw error;
+  }
+}
+
+async exportDailyDataToExcel(period = 'today', customDate = null) {
+  try {
+    console.log(`📊 [EXPORT COMPLET] Génération du fichier Excel...`);
+    
+    // ✅ IMPORT DYNAMIQUE
+    const XLSX = await import('xlsx');
+    const xlsxLib = XLSX.default || XLSX;
+    
+    // Récupérer les données du dashboard
+    const dashboardData = await this.getAdminDashboard(period, customDate);
+    
+    // Créer le workbook
+    const wb = xlsxLib.utils.book_new();
+    
+    // FEUILLE 1: Résumé Global
+    const summaryData = [
+      ['RAPPORT QUOTIDIEN - RÉSUMÉ GLOBAL'],
+      ['Période', this.getPeriodLabel(period, customDate)],
+      ['Date de génération', new Date().toLocaleString('fr-FR')],
+      [''],
+      ['Métrique', 'Valeur'],
+      ['Début Total', dashboardData.globalTotals.debutTotalGlobal],
+      ['Sortie Total', dashboardData.globalTotals.sortieTotalGlobal],
+      ['GR Total', dashboardData.globalTotals.grTotalGlobal],
+      ['Nombre de Superviseurs', dashboardData.supervisorCards.length]
+    ];
+    
+    const wsSummary = xlsxLib.utils.aoa_to_sheet(summaryData);
+    xlsxLib.utils.book_append_sheet(wb, wsSummary, 'Résumé');
+    
+    // FEUILLE 2: Détail par superviseur
+    const detailData = [];
+    detailData.push(['DÉTAIL PAR SUPERVISEUR']);
+    detailData.push(['']);
+    detailData.push(['Superviseur', 'Type Compte', 'Début', 'Sortie', 'GR']);
+    
+    dashboardData.supervisorCards.forEach(supervisor => {
+      let isFirst = true;
+      
+      Object.keys(supervisor.comptes.debut).forEach(accountType => {
+        const debut = supervisor.comptes.debut[accountType] || 0;
+        const sortie = supervisor.comptes.sortie[accountType] || 0;
+        const gr = sortie - debut;
+        
+        detailData.push([
+          isFirst ? supervisor.nom : '',
+          this.getAccountTypeLabel(accountType),
+          debut,
+          sortie,
+          gr
+        ]);
+        
+        isFirst = false;
+      });
+      
+      detailData.push(['']); // Ligne vide entre superviseurs
+    });
+    
+    const wsDetail = xlsxLib.utils.aoa_to_sheet(detailData);
+    xlsxLib.utils.book_append_sheet(wb, wsDetail, 'Détails');
+    
+    // FEUILLE 3: Synthèse par compte
+    const accountSummaryData = [];
+    accountSummaryData.push(['SYNTHÈSE PAR TYPE DE COMPTE']);
+    accountSummaryData.push(['']);
+    accountSummaryData.push(['Type de Compte', 'Début Total', 'Sortie Total', 'GR Total']);
+    
+    // Agréger par type de compte
+    const accountTotals = {};
+    dashboardData.supervisorCards.forEach(supervisor => {
+      Object.keys(supervisor.comptes.debut).forEach(accountType => {
+        if (!accountTotals[accountType]) {
+          accountTotals[accountType] = { debut: 0, sortie: 0, gr: 0 };
+        }
+        
+        accountTotals[accountType].debut += supervisor.comptes.debut[accountType] || 0;
+        accountTotals[accountType].sortie += supervisor.comptes.sortie[accountType] || 0;
+        accountTotals[accountType].gr += (supervisor.comptes.sortie[accountType] || 0) - (supervisor.comptes.debut[accountType] || 0);
+      });
+    });
+    
+    Object.keys(accountTotals).forEach(accountType => {
+      accountSummaryData.push([
+        this.getAccountTypeLabel(accountType),
+        accountTotals[accountType].debut,
+        accountTotals[accountType].sortie,
+        accountTotals[accountType].gr
+      ]);
+    });
+    
+    const wsAccountSummary = xlsxLib.utils.aoa_to_sheet(accountSummaryData);
+    xlsxLib.utils.book_append_sheet(wb, wsAccountSummary, 'Par Compte');
+    
+    // Générer le nom du fichier
+    const fileName = `Rapport_${period}_${new Date().toISOString().split('T')[0]}.xlsx`;
+    const filePath = `/tmp/${fileName}`;
+    
+    // Écrire le fichier
+    xlsxLib.writeFile(wb, filePath);
+    
+    console.log(`✅ [EXPORT COMPLET] Fichier généré: ${filePath}`);
+    
+    return {
+      success: true,
+      fileName,
+      filePath,
+      period,
+      sheets: ['Résumé', 'Détails', 'Par Compte']
+    };
+    
+  } catch (error) {
+    console.error('❌ [EXPORT COMPLET] Erreur:', error);
+    throw error;
+  }
+}
+
+// Méthode helper pour les labels
+getPeriodLabel(period, customDate) {
+  const labels = {
+    today: 'Aujourd\'hui',
+    yesterday: 'Hier',
+    week: 'Cette semaine',
+    month: 'Ce mois',
+    year: 'Cette année',
+    all: 'Toutes les périodes',
+    custom: customDate ? `Date personnalisée: ${customDate}` : 'Date personnalisée'
+  };
+  
+  return labels[period] || period;
+}
+
+getAccountTypeLabel(accountType) {
+  const labels = {
+    LIQUIDE: 'Liquide',
+    ORANGE_MONEY: 'Orange Money',
+    WAVE: 'Wave',
+    UV_MASTER: 'UV Master',
+    AUTRES: 'Autres'
+  };
+  
+  return labels[accountType] || accountType;
+}
   async debugResetState() {
     try {
       const now = new Date();

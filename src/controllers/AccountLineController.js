@@ -348,17 +348,17 @@ class AccountLineController {
         accountKey,
         deletedBy
       });
-
+  
       const supervisor = await prisma.user.findUnique({
         where: { id: supervisorId, role: 'SUPERVISEUR' }
       });
-
+  
       if (!supervisor) {
         throw new Error('Superviseur non trouvé');
       }
-
+  
       let result = {};
-
+  
       if (accountKey.startsWith('part-')) {
         result = await this.deletePartnerAccountLine(supervisorId, lineType, accountKey, deletedBy);
       } else {
@@ -368,31 +368,38 @@ class AccountLineController {
             type: accountKey
           }
         });
-
+  
         if (!account) {
           throw new Error(`Compte ${accountKey} non trouvé`);
         }
-
+  
         const oldValue = lineType === 'debut' 
           ? Number(account.initialBalance) / 100 
           : Number(account.balance) / 100;
-
+  
         if (oldValue === 0) {
           throw new Error('Cette ligne est déjà à zéro, rien à supprimer');
         }
-
+  
+        // 🆕 IMPORTANT : On modifie SEULEMENT le compte actuel
+        // Les snapshots ne sont JAMAIS touchés
         const updateData = {};
         if (lineType === 'debut') {
           updateData.initialBalance = 0n;
+          // ❌ NE PAS TOUCHER previousInitialBalance (c'est l'historique d'hier)
         } else {
           updateData.balance = 0n;
         }
-
+  
         await prisma.account.update({
           where: { id: account.id },
           data: updateData
         });
-
+  
+        console.log(`✅ [DELETION] Compte ${accountKey} (${lineType}) mis à 0`);
+        console.log(`ℹ️  [DELETION] previousInitialBalance préservé : ${Number(account.previousInitialBalance) / 100} F`);
+  
+        // Créer un audit de suppression
         await prisma.transaction.create({
           data: {
             montant: BigInt(Math.round(oldValue * 100)),
@@ -408,36 +415,39 @@ class AccountLineController {
               oldValue,
               deletedBy,
               deletedAt: new Date().toISOString(),
-              reason: 'Suppression manuelle depuis le dashboard'
+              reason: 'Suppression manuelle depuis le dashboard',
+              previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100
             })
           }
         });
-
+  
         await NotificationService.createNotification({
           userId: supervisorId,
           title: 'Ligne de compte supprimée',
           message: `Votre ligne ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) de ${oldValue} F a été supprimée`,
           type: 'AUDIT_SUPPRESSION'
         });
-
+  
         result = {
           accountId: account.id,
           accountKey,
           lineType,
           oldValue,
-          newValue: 0
+          newValue: 0,
+          historicalDataPreserved: true,
+          previousInitialBalance: Number(account.previousInitialBalance) / 100
         };
       }
-
+  
       console.log('✅ [CONTROLLER] Ligne supprimée avec succès:', result);
-
+  
       return {
         ...result,
         supervisor: supervisor.nomComplet,
         deletedAt: new Date(),
         auditCreated: true
       };
-
+  
     } catch (error) {
       console.error('❌ [CONTROLLER] Erreur executeAccountLineDeletion:', error);
       throw error;
@@ -610,7 +620,7 @@ class AccountLineController {
       const { supervisorId, lineType } = req.params;
       const { accountKey, newValue = 0 } = req.body;
       const userId = req.user.id;
-
+  
       console.log('🔄 [CONTROLLER] resetAccountLine:', {
         supervisorId,
         lineType,
@@ -619,21 +629,21 @@ class AccountLineController {
         userId,
         userRole: req.user.role
       });
-
+  
       if (!accountKey) {
         return res.status(400).json({
           success: false,
           message: 'Clé de compte requise'
         });
       }
-
+  
       if (newValue < 0) {
         return res.status(400).json({
           success: false,
           message: 'La nouvelle valeur ne peut pas être négative'
         });
       }
-
+  
       const resetPermission = await this.checkResetPermissions(req.user, supervisorId, accountKey, lineType);
       if (!resetPermission.allowed) {
         return res.status(403).json({
@@ -641,20 +651,20 @@ class AccountLineController {
           message: resetPermission.reason
         });
       }
-
+  
       const supervisor = await prisma.user.findUnique({
         where: { id: supervisorId, role: 'SUPERVISEUR' }
       });
-
+  
       if (!supervisor) {
         return res.status(404).json({
           success: false,
           message: 'Superviseur non trouvé'
         });
       }
-
+  
       const newValueCentimes = Math.round(newValue * 100);
-
+  
       const account = await prisma.account.upsert({
         where: {
           userId_type: {
@@ -671,23 +681,29 @@ class AccountLineController {
           previousInitialBalance: 0n
         }
       });
-
+  
       const oldValue = lineType === 'debut' 
         ? Number(account.initialBalance) / 100 
         : Number(account.balance) / 100;
-
+  
+      // 🆕 IMPORTANT : On modifie SEULEMENT le compte actuel
+      // Les snapshots et previousInitialBalance ne sont JAMAIS touchés
       const updateData = {};
       if (lineType === 'debut') {
         updateData.initialBalance = BigInt(newValueCentimes);
+        // ❌ NE PAS TOUCHER previousInitialBalance
       } else {
         updateData.balance = BigInt(newValueCentimes);
       }
-
+  
       await prisma.account.update({
         where: { id: account.id },
         data: updateData
       });
-
+  
+      console.log(`✅ [RESET] Compte ${accountKey} (${lineType}) modifié: ${oldValue} F → ${newValue} F`);
+      console.log(`ℹ️  [RESET] previousInitialBalance préservé : ${Number(account.previousInitialBalance) / 100} F`);
+  
       await prisma.transaction.create({
         data: {
           montant: BigInt(Math.abs(newValueCentimes)),
@@ -706,18 +722,19 @@ class AccountLineController {
             resetByRole: req.user.role,
             resetAt: new Date().toISOString(),
             hasOwnTransactions: resetPermission.hasOwnTransactions,
-            accountCreated: account.createdAt.getTime() === account.updatedAt.getTime()
+            accountCreated: account.createdAt.getTime() === account.updatedAt.getTime(),
+            previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100
           })
         }
       });
-
+  
       await NotificationService.createNotification({
         userId: supervisorId,
         title: 'Compte réinitialisé',
         message: `Votre compte ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) a été réinitialisé de ${oldValue} F à ${newValue} F${req.user.role === 'ADMIN' ? ' par un administrateur' : ''}`,
         type: 'AUDIT_MODIFICATION'
       });
-
+  
       res.json({
         success: true,
         message: `Compte ${accountKey} (${lineType}) réinitialisé`,
@@ -729,26 +746,14 @@ class AccountLineController {
           resetAt: new Date(),
           resetBy: req.user.role,
           hasOwnTransactions: resetPermission.hasOwnTransactions,
-          supervisor: supervisor.nomComplet
+          supervisor: supervisor.nomComplet,
+          historicalDataPreserved: true,
+          previousInitialBalance: Number(account.previousInitialBalance) / 100
         }
       });
-
+  
     } catch (error) {
       console.error('❌ [CONTROLLER] Erreur resetAccountLine:', error);
-      
-      if (error.code === 'P2002') {
-        return res.status(400).json({
-          success: false,
-          message: 'Conflit lors de la création/mise à jour du compte'
-        });
-      }
-
-      if (error.code === 'P2025') {
-        return res.status(404).json({
-          success: false,
-          message: 'Enregistrement non trouvé'
-        });
-      }
       
       res.status(500).json({
         success: false,
@@ -756,6 +761,7 @@ class AccountLineController {
       });
     }
   }
+  
 
   checkResetPermissions = async (user, supervisorId, accountKey, lineType) => {
     try {

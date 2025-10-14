@@ -1097,6 +1097,8 @@ async getAvailableDates(req, res) {
   }
 }
 
+
+
 // Nouvelle méthode - Test filtrage date (ADMIN seulement)
 async testDateFilter(req, res) {
   try {

@@ -10,6 +10,8 @@ import userRoutes from './routes/userRoutes.js';
 import TransactionRoute from './routes/transactionRoutes.js';
 import RecentTransactionRoutes from './routes/recentTransactionRoutes.js';
 import AccountLines from './routes/accountLines.js';
+import exportRoutes from './routes/export.js';
+
 
 const app = express();
 
@@ -174,7 +176,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/transactions', TransactionRoute);
 app.use('/api/recent', RecentTransactionRoutes);
 app.use('/api/account-lines', AccountLines);
-
+app.use('/api/export', exportRoutes);
 
 // Route de test auth
 app.get('/api/test-auth', (req, res) => {
