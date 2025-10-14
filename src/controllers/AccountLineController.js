@@ -1,4 +1,4 @@
-// src/controllers/AccountLineController.js - VERSION COMPLÈTE CORRIGÉE
+// src/controllers/AccountLineController.js - VERSION CORRIGÉE HISTORIQUE
 import prisma from '../config/database.js';
 import NotificationService from '../services/NotificationService.js';
 
@@ -381,12 +381,11 @@ class AccountLineController {
           throw new Error('Cette ligne est déjà à zéro, rien à supprimer');
         }
   
-        // 🆕 IMPORTANT : On modifie SEULEMENT le compte actuel
-        // Les snapshots ne sont JAMAIS touchés
+        // 🔒 CRITIQUE : Modifier UNIQUEMENT balance ou initialBalance
+        // ⚠️ JAMAIS previousInitialBalance (données historiques protégées)
         const updateData = {};
         if (lineType === 'debut') {
           updateData.initialBalance = 0n;
-          // ❌ NE PAS TOUCHER previousInitialBalance (c'est l'historique d'hier)
         } else {
           updateData.balance = 0n;
         }
@@ -396,15 +395,15 @@ class AccountLineController {
           data: updateData
         });
   
-        console.log(`✅ [DELETION] Compte ${accountKey} (${lineType}) mis à 0`);
-        console.log(`ℹ️  [DELETION] previousInitialBalance préservé : ${Number(account.previousInitialBalance) / 100} F`);
+        console.log(`✅ [DELETION] Compte ${accountKey} (${lineType}) mis à 0 (TODAY uniquement)`);
+        console.log(`🔒 [DELETION] previousInitialBalance PROTÉGÉ : ${Number(account.previousInitialBalance) / 100} F`);
   
         // Créer un audit de suppression
         await prisma.transaction.create({
           data: {
             montant: BigInt(Math.round(oldValue * 100)),
             type: 'AUDIT_SUPPRESSION',
-            description: `Suppression ligne ${accountKey} (${lineType}) - Valeur supprimée: ${oldValue} F`,
+            description: `Suppression ligne ${accountKey} (${lineType}) - Valeur supprimée: ${oldValue} F - Affecte UNIQUEMENT TODAY`,
             envoyeurId: deletedBy,
             destinataireId: supervisorId,
             compteDestinationId: account.id,
@@ -416,7 +415,9 @@ class AccountLineController {
               deletedBy,
               deletedAt: new Date().toISOString(),
               reason: 'Suppression manuelle depuis le dashboard',
-              previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100
+              previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100,
+              scope: 'TODAY_ONLY',
+              historicalDataUntouched: true
             })
           }
         });
@@ -424,7 +425,7 @@ class AccountLineController {
         await NotificationService.createNotification({
           userId: supervisorId,
           title: 'Ligne de compte supprimée',
-          message: `Votre ligne ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) de ${oldValue} F a été supprimée`,
+          message: `Votre ligne ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) de ${oldValue} F a été supprimée (affecte uniquement TODAY)`,
           type: 'AUDIT_SUPPRESSION'
         });
   
@@ -435,7 +436,8 @@ class AccountLineController {
           oldValue,
           newValue: 0,
           historicalDataPreserved: true,
-          previousInitialBalance: Number(account.previousInitialBalance) / 100
+          previousInitialBalance: Number(account.previousInitialBalance) / 100,
+          scope: 'TODAY_ONLY'
         };
       }
   
@@ -553,7 +555,9 @@ class AccountLineController {
               deletedBy,
               deletedAt: new Date().toISOString(),
               originalDescription: transaction.description,
-              deletionReason: 'Suppression ligne partenaire depuis dashboard'
+              deletionReason: 'Suppression ligne partenaire depuis dashboard',
+              scope: 'TODAY_ONLY',
+              historicalDataUntouched: true
             })
           }
         })
@@ -566,7 +570,7 @@ class AccountLineController {
         data: {
           montant: BigInt(Math.round(totalValue * 100)),
           type: 'AUDIT_SUPPRESSION',
-          description: `Suppression transactions partenaire ${partnerName} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F`,
+          description: `Suppression transactions partenaire ${partnerName} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F - Affecte UNIQUEMENT TODAY`,
           envoyeurId: deletedBy,
           destinataireId: supervisorId,
           partenaireId: targetPartner.id,
@@ -582,7 +586,9 @@ class AccountLineController {
             transactionIds: transactions.map(t => t.id),
             deletedBy,
             deletedAt: new Date().toISOString(),
-            duplicateNamesFound: partnersWithSameName.length > 1
+            duplicateNamesFound: partnersWithSameName.length > 1,
+            scope: 'TODAY_ONLY',
+            historicalDataUntouched: true
           })
         }
       });
@@ -590,7 +596,7 @@ class AccountLineController {
       await NotificationService.createNotification({
         userId: supervisorId,
         title: 'Transactions partenaire supprimées',
-        message: `${transactions.length} transaction(s) ${transactionType} de ${partnerName} (${totalValue} F) ont été supprimées`,
+        message: `${transactions.length} transaction(s) ${transactionType} de ${partnerName} (${totalValue} F) ont été supprimées (affecte uniquement TODAY)`,
         type: 'AUDIT_SUPPRESSION'
       });
 
@@ -603,7 +609,8 @@ class AccountLineController {
         transactionsDeleted: transactions.length,
         oldValue: totalValue,
         newValue: 0,
-        duplicateNamesHandled: partnersWithSameName.length > 1
+        duplicateNamesHandled: partnersWithSameName.length > 1,
+        scope: 'TODAY_ONLY'
       };
 
       console.log('✅ [PARTNER DELETE] Suppression terminée avec succès:', result);
@@ -686,12 +693,11 @@ class AccountLineController {
         ? Number(account.initialBalance) / 100 
         : Number(account.balance) / 100;
   
-      // 🆕 IMPORTANT : On modifie SEULEMENT le compte actuel
-      // Les snapshots et previousInitialBalance ne sont JAMAIS touchés
+      // 🔒 CRITIQUE : Modifier UNIQUEMENT balance ou initialBalance
+      // ⚠️ JAMAIS previousInitialBalance (données historiques protégées)
       const updateData = {};
       if (lineType === 'debut') {
         updateData.initialBalance = BigInt(newValueCentimes);
-        // ❌ NE PAS TOUCHER previousInitialBalance
       } else {
         updateData.balance = BigInt(newValueCentimes);
       }
@@ -701,14 +707,14 @@ class AccountLineController {
         data: updateData
       });
   
-      console.log(`✅ [RESET] Compte ${accountKey} (${lineType}) modifié: ${oldValue} F → ${newValue} F`);
-      console.log(`ℹ️  [RESET] previousInitialBalance préservé : ${Number(account.previousInitialBalance) / 100} F`);
+      console.log(`✅ [RESET] Compte ${accountKey} (${lineType}) modifié: ${oldValue} F → ${newValue} F (TODAY uniquement)`);
+      console.log(`🔒 [RESET] previousInitialBalance PROTÉGÉ : ${Number(account.previousInitialBalance) / 100} F`);
   
       await prisma.transaction.create({
         data: {
           montant: BigInt(Math.abs(newValueCentimes)),
           type: 'AUDIT_MODIFICATION',
-          description: `Réinitialisation ${accountKey} (${lineType}) par ${req.user.role} - ${oldValue} F → ${newValue} F`,
+          description: `Réinitialisation ${accountKey} (${lineType}) par ${req.user.role} - ${oldValue} F → ${newValue} F - Affecte UNIQUEMENT TODAY`,
           envoyeurId: userId,
           destinataireId: supervisorId,
           compteDestinationId: account.id,
@@ -723,7 +729,9 @@ class AccountLineController {
             resetAt: new Date().toISOString(),
             hasOwnTransactions: resetPermission.hasOwnTransactions,
             accountCreated: account.createdAt.getTime() === account.updatedAt.getTime(),
-            previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100
+            previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100,
+            scope: 'TODAY_ONLY',
+            historicalDataUntouched: true
           })
         }
       });
@@ -731,7 +739,7 @@ class AccountLineController {
       await NotificationService.createNotification({
         userId: supervisorId,
         title: 'Compte réinitialisé',
-        message: `Votre compte ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) a été réinitialisé de ${oldValue} F à ${newValue} F${req.user.role === 'ADMIN' ? ' par un administrateur' : ''}`,
+        message: `Votre compte ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) a été réinitialisé de ${oldValue} F à ${newValue} F${req.user.role === 'ADMIN' ? ' par un administrateur' : ''} (affecte uniquement TODAY)`,
         type: 'AUDIT_MODIFICATION'
       });
   
@@ -748,7 +756,8 @@ class AccountLineController {
           hasOwnTransactions: resetPermission.hasOwnTransactions,
           supervisor: supervisor.nomComplet,
           historicalDataPreserved: true,
-          previousInitialBalance: Number(account.previousInitialBalance) / 100
+          previousInitialBalance: Number(account.previousInitialBalance) / 100,
+          scope: 'TODAY_ONLY'
         }
       });
   
@@ -763,92 +772,68 @@ class AccountLineController {
   }
   
 
-  checkResetPermissions = async (user, supervisorId, accountKey, lineType) => {
+  checkDeletePermissions = async (user, supervisorId, accountKey) => {
     try {
-      console.log('🔍 [PERMISSIONS] Vérification reset permissions:', {
+      console.log('🔍 [PERMISSIONS] Vérification delete permissions:', {
         userId: user.id,
         userRole: user.role,
         supervisorId,
-        accountKey,
-        lineType
+        accountKey
       });
 
       if (user.role === 'ADMIN') {
-        return { 
-          allowed: true, 
-          hasOwnTransactions: false,
-          reason: 'Administrateur - accès complet' 
-        };
+        return { allowed: true, reason: 'Administrateur - accès complet' };
       }
 
       if (user.role !== 'SUPERVISEUR') {
-        return { 
-          allowed: false, 
-          hasOwnTransactions: false,
-          reason: 'Permissions insuffisantes' 
-        };
+        return { allowed: false, reason: 'Permissions insuffisantes' };
       }
 
       if (user.id !== supervisorId) {
-        return { 
-          allowed: false, 
-          hasOwnTransactions: false,
-          reason: 'Vous ne pouvez réinitialiser que vos propres comptes' 
-        };
+        return { allowed: false, reason: 'Vous ne pouvez supprimer que vos propres comptes' };
+      }
+
+      if (accountKey === 'UV_MASTER') {
+        return { allowed: false, reason: 'Impossible de supprimer le compte UV_MASTER' };
       }
 
       const timeCheck = await this.checkRecentTransactions(supervisorId, accountKey);
       if (timeCheck && timeCheck.blocked) {
         return { 
           allowed: false, 
-          hasOwnTransactions: false,
           reason: timeCheck.reason 
         };
       }
 
       if (accountKey.startsWith('part-')) {
-        const hasOwnTransactions = await this.checkSupervisorOwnTransactions(supervisorId, accountKey, lineType);
+        const hasOwnDebutTransactions = await this.checkSupervisorOwnTransactions(supervisorId, accountKey, 'debut');
+        const hasOwnSortieTransactions = await this.checkSupervisorOwnTransactions(supervisorId, accountKey, 'sortie');
+        
+        if (!hasOwnDebutTransactions && !hasOwnSortieTransactions) {
+          return { 
+            allowed: false, 
+            reason: 'Vous ne pouvez supprimer que les transactions que vous avez créées' 
+          };
+        }
+      } else {
+        const hasOwnTransactions = await this.checkAccountOwnership(supervisorId, accountKey, 'any');
         
         if (!hasOwnTransactions) {
           return { 
             allowed: false, 
-            hasOwnTransactions: false,
-            reason: 'Vous ne pouvez modifier que les transactions que vous avez créées' 
+            reason: 'Vous ne pouvez supprimer que les comptes créés par vos propres transactions' 
           };
         }
-
-        return { 
-          allowed: true, 
-          hasOwnTransactions: true,
-          reason: 'Superviseur - peut modifier ses propres transactions partenaires' 
-        };
       }
 
-      const hasOwnTransactions = await this.checkAccountOwnership(supervisorId, accountKey, lineType);
-      
-      if (!hasOwnTransactions) {
-        return { 
-          allowed: false, 
-          hasOwnTransactions: false,
-          reason: 'Vous ne pouvez modifier que les comptes créés par vos propres transactions' 
-        };
-      }
-
-      return { 
-        allowed: true, 
-        hasOwnTransactions: true,
-        reason: 'Superviseur - peut modifier ses propres comptes' 
-      };
+      return { allowed: true, reason: 'Superviseur - peut supprimer dans la fenêtre autorisée' };
 
     } catch (error) {
-      console.error('❌ [PERMISSIONS] Erreur checkResetPermissions:', error);
-      return { 
-        allowed: false, 
-        hasOwnTransactions: false,
-        reason: 'Erreur lors de la vérification des permissions' 
-      };
+      console.error('❌ [PERMISSIONS] Erreur checkDeletePermissions:', error);
+      return { allowed: false, reason: 'Erreur lors de la vérification des permissions' };
     }
   }
+
   getAccountDeletionHistory = async (req, res) => {
     try {
       if (req.user.role !== 'ADMIN') {
@@ -916,7 +901,7 @@ class AccountLineController {
         message: 'Erreur lors de la récupération de l\'historique'
       });
     }
-  } // <- Vérifiez que cette accolade est bien présente
+  }
 }
 
 export default new AccountLineController();
