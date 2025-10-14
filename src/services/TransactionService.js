@@ -7,8 +7,8 @@ class TransactionService {
   // CONFIGURATION CENTRALISÉE DU RESET
   // =====================================
  static RESET_CONFIG = {
-  hour: 1,
-  minute: 46,
+  hour: 0,
+  minute: 0,
   windowMinutes: 0
 };
 
