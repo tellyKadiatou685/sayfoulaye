@@ -13,7 +13,7 @@ class TransactionService {
 };
 
   // =====================================
-  // SYSTÈME DE NOTIFICATIONS ET AUTO-REFRESH
+  // SYSTÈME DE NOTIFICATIONS ET AUTO-REFRESHFP
   // =====================================
   async needsDashboardRefresh(lastCheckTime) {
     try {
@@ -1653,222 +1653,225 @@ async forceReset(adminId = 'vercel-cron') {
     }
   }
   
-  async getSupervisorDashboard(superviseurId, period = 'today', customDate = null) {
-    try {
-      const dateFilter = this.getDateFilter(period, customDate);
-      const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
-      
-      console.log(`📊 [SUPERVISOR DASHBOARD] Superviseur: ${superviseurId}, Period: ${period}, Include archived: ${includeArchived}`);
-      
-      // 🆕 CORRECTION : Déterminer la date snapshot comme l'admin
-      let snapshotDate = null;
-      if (includeArchived) {
-        if (period === 'yesterday') {
-          snapshotDate = new Date();
-          snapshotDate.setDate(snapshotDate.getDate() - 1);
+  // REMPLACER la section "Cas date passée sans snapshot" dans getSupervisorDashboard
+// À partir de la ligne ~2028 jusqu'à la ligne ~2178
+
+// REMPLACER COMPLÈTEMENT getSupervisorDashboard dans TransactionService.js
+// À partir de la ligne ~1900 environ
+
+async getSupervisorDashboard(superviseurId, period = 'today', customDate = null) {
+  try {
+    const dateFilter = this.getDateFilter(period, customDate);
+    const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
+    
+    console.log(`📊 [SUPERVISOR DASHBOARD] Superviseur: ${superviseurId}, Period: ${period}, Include archived: ${includeArchived}`);
+    
+    // 🆕 CORRECTION : Déterminer la date snapshot comme l'admin
+    let snapshotDate = null;
+    if (includeArchived) {
+      if (period === 'yesterday') {
+        snapshotDate = new Date();
+        snapshotDate.setDate(snapshotDate.getDate() - 1);
+        snapshotDate.setHours(0, 0, 0, 0);
+      } else if (period === 'custom' && customDate) {
+        const targetDate = new Date(customDate);
+        const targetDateOnly = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+        const todayOnly = new Date();
+        todayOnly.setHours(0, 0, 0, 0);
+        
+        if (targetDateOnly < todayOnly) {
+          snapshotDate = targetDate;
           snapshotDate.setHours(0, 0, 0, 0);
-        } else if (period === 'custom' && customDate) {
-          const targetDate = new Date(customDate);
-          const targetDateOnly = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
-          const todayOnly = new Date();
-          todayOnly.setHours(0, 0, 0, 0);
-          
-          if (targetDateOnly < todayOnly) {
-            snapshotDate = targetDate;
-            snapshotDate.setHours(0, 0, 0, 0);
+        }
+      }
+      console.log(`📸 [SUPERVISOR DASHBOARD] Date snapshot cible: ${snapshotDate?.toISOString().split('T')[0]}`);
+    }
+    
+    // Filtre transactions simplifié
+    let transactionFilter = { 
+      createdAt: dateFilter,
+      AND: [{ OR: [{ envoyeurId: superviseurId }, { destinataireId: superviseurId }] }]
+    };
+
+    // 🆕 CORRECTION : Utiliser snapshots pour hier, pas les transactions archivées
+    if (!snapshotDate) {
+      // Données actuelles : exclure les transactions archivées
+      transactionFilter = {
+        ...transactionFilter,
+        OR: [{ archived: { equals: false } }, { archived: { equals: null } }]
+      };
+    }
+
+    const [supervisor, allTransactions, uvMasterAccounts] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: superviseurId },
+        select: {
+          id: true, nomComplet: true, status: true,
+          accounts: {
+            select: {
+              type: true, balance: true, initialBalance: true, previousInitialBalance: true
+            }
           }
         }
-        console.log(`📸 [SUPERVISOR DASHBOARD] Date snapshot cible: ${snapshotDate?.toISOString().split('T')[0]}`);
-      }
+      }),
+      // 🆕 CORRECTION : Ne charger les transactions que si pas de snapshot
+      snapshotDate ? Promise.resolve([]) : prisma.transaction.findMany({
+        where: transactionFilter,
+        select: {
+          id: true, type: true, montant: true, description: true, createdAt: true,
+          envoyeurId: true, destinataireId: true, partenaireId: true, 
+          partenaireNom: true,
+          archived: true,
+          destinataire: { select: { nomComplet: true } },
+          envoyeur: { select: { nomComplet: true } },
+          partenaire: { select: { nomComplet: true } }
+        },
+        orderBy: { createdAt: 'desc' }, take: 50
+      }),
+      prisma.account.findMany({
+        where: { type: 'UV_MASTER', user: { role: 'SUPERVISEUR', status: 'ACTIVE' } },
+        select: { balance: true, initialBalance: true, previousInitialBalance: true }
+      })
+    ]);
+
+    if (!supervisor) throw new Error('Superviseur non trouvé');
+
+    // 🆕 CORRECTION : Cas date passée sans snapshot (comme admin)
+    if (snapshotDate && allTransactions.length === 0) {
+      const snapshot = await this.getSnapshotForDate(superviseurId, snapshotDate);
       
-      // Filtre transactions simplifié
-      let transactionFilter = { 
-        createdAt: dateFilter,
-        AND: [{ OR: [{ envoyeurId: superviseurId }, { destinataireId: superviseurId }] }]
-      };
-  
-      // 🆕 CORRECTION : Utiliser snapshots pour hier, pas les transactions archivées
-      if (!snapshotDate) {
-        // Données actuelles : exclure les transactions archivées
-        transactionFilter = {
-          ...transactionFilter,
-          OR: [{ archived: { equals: false } }, { archived: { equals: null } }]
+      if (!snapshot) {
+        console.log(`⚠️ [SUPERVISOR DASHBOARD] Pas de snapshot pour ${snapshotDate.toISOString().split('T')[0]}`);
+        
+        return {
+          superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
+          period, customDate,
+          uvMaster: { personal: { debut: 0, sortie: 0, formatted: "0 F" }, total: 0, formatted: "0 F" },
+          comptes: { debut: {}, sortie: {} },
+          totaux: {
+            debutTotal: 0, sortieTotal: 0, grTotal: 0,
+            formatted: { debutTotal: "0 F", sortieTotal: "0 F", grTotal: "0 F" }
+          },
+          recentTransactions: [],
+          dynamicConfig: {
+            period, customDate, resetConfig: this.getResetConfig(), includeArchived,
+            totalTransactionsFound: 0, filterApplied: 'snapshot_not_found', 
+            dataSource: 'no_data', snapshotDate: snapshotDate.toISOString().split('T')[0]
+          }
         };
       }
-  
-      const [supervisor, allTransactions, uvMasterAccounts] = await Promise.all([
-        prisma.user.findUnique({
-          where: { id: superviseurId },
+    }
+
+    const accountsByType = { debut: {}, sortie: {} };
+    let totalDebutPersonnel = 0, totalSortiePersonnel = 0;
+
+    // 🆕 CORRECTION : Logique comptes identique à l'admin
+    if (snapshotDate) {
+      // ✅ DONNÉES HISTORIQUES VIA SNAPSHOT
+      const snapshot = await this.getSnapshotForDate(superviseurId, snapshotDate);
+      
+      if (snapshot) {
+        console.log(`📸 [SUPERVISOR DASHBOARD] ✅ Snapshot trouvé pour ${supervisor.nomComplet} le ${snapshotDate.toISOString().split('T')[0]}`);
+        
+        // Récupérer les comptes standards depuis le snapshot
+        Object.assign(accountsByType.debut, snapshot.comptes.debut);
+        Object.assign(accountsByType.sortie, snapshot.comptes.sortie);
+        
+        totalDebutPersonnel = snapshot.totaux.debutTotal;
+        totalSortiePersonnel = snapshot.totaux.sortieTotal;
+
+        // 🆕 CORRECTION CRITIQUE : Charger les transactions partenaires archivées pour HIER
+        console.log(`📦 [SUPERVISOR DASHBOARD] Chargement des transactions partenaires pour HIER...`);
+        console.log(`🔍 [DEBUG] superviseurId: ${superviseurId}`);
+        console.log(`🔍 [DEBUG] period: ${period}`);
+        
+        // ✅ FIX : Utiliser getYesterdayRange() pour avoir la plage exacte
+        const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
+        
+
+        // 🔍 DEBUG DÉTAILLÉ : Vérifier TOUTES les transactions partenaires de ce superviseur
+        const allPartnerTransactions = await prisma.transaction.findMany({
+          where: {
+            destinataireId: superviseurId,
+            type: { in: ['DEPOT', 'RETRAIT'] },
+            OR: [
+              { partenaireId: { not: null } },
+              { partenaireNom: { not: null } }
+            ]
+          },
           select: {
-            id: true, nomComplet: true, status: true,
-            accounts: {
-              select: {
-                type: true, balance: true, initialBalance: true, previousInitialBalance: true
-              }
-            }
-          }
-        }),
-        // 🆕 CORRECTION : Ne charger les transactions que si pas de snapshot
-        snapshotDate ? Promise.resolve([]) : prisma.transaction.findMany({
-          where: transactionFilter,
-          select: {
-            id: true, type: true, montant: true, description: true, createdAt: true,
-            envoyeurId: true, destinataireId: true, partenaireId: true, 
+            id: true,
+            type: true,
+            montant: true,
+            partenaireId: true,
             partenaireNom: true,
+            createdAt: true,
             archived: true,
-            destinataire: { select: { nomComplet: true } },
-            envoyeur: { select: { nomComplet: true } },
+            archivedAt: true,
             partenaire: { select: { nomComplet: true } }
           },
-          orderBy: { createdAt: 'desc' }, take: 50
-        }),
-        prisma.account.findMany({
-          where: { type: 'UV_MASTER', user: { role: 'SUPERVISEUR', status: 'ACTIVE' } },
-          select: { balance: true, initialBalance: true, previousInitialBalance: true }
-        })
-      ]);
-  
-      if (!supervisor) throw new Error('Superviseur non trouvé');
-  
-      // 🆕 CORRECTION : Cas date passée sans snapshot (comme admin)
-      if (snapshotDate && allTransactions.length === 0) {
-        const snapshot = await this.getSnapshotForDate(superviseurId, snapshotDate);
-        
-        if (!snapshot) {
-          console.log(`⚠️ [SUPERVISOR DASHBOARD] Pas de snapshot pour ${snapshotDate.toISOString().split('T')[0]}`);
-          
-          return {
-            superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
-            period, customDate,
-            uvMaster: { personal: { debut: 0, sortie: 0, formatted: "0 F" }, total: 0, formatted: "0 F" },
-            comptes: { debut: {}, sortie: {} },
-            totaux: {
-              debutTotal: 0, sortieTotal: 0, grTotal: 0,
-              formatted: { debutTotal: "0 F", sortieTotal: "0 F", grTotal: "0 F" }
-            },
-            recentTransactions: [],
-            dynamicConfig: {
-              period, customDate, resetConfig: this.getResetConfig(), includeArchived,
-              totalTransactionsFound: 0, filterApplied: 'snapshot_not_found', 
-              dataSource: 'no_data', snapshotDate: snapshotDate.toISOString().split('T')[0]
-            }
-          };
-        }
-      }
-  
-      const accountsByType = { debut: {}, sortie: {} };
-      let totalDebutPersonnel = 0, totalSortiePersonnel = 0;
-  
-      // 🆕 CORRECTION : Logique comptes identique à l'admin
-      if (snapshotDate) {
-        // ✅ DONNÉES HISTORIQUES VIA SNAPSHOT
-        const snapshot = await this.getSnapshotForDate(superviseurId, snapshotDate);
-        
-        if (snapshot) {
-          console.log(`📸 [SUPERVISOR DASHBOARD] ✅ Snapshot trouvé pour ${supervisor.nomComplet} le ${snapshotDate.toISOString().split('T')[0]}`);
-          
-          // Récupérer les comptes standards depuis le snapshot
-          Object.assign(accountsByType.debut, snapshot.comptes.debut);
-          Object.assign(accountsByType.sortie, snapshot.comptes.sortie);
-          
-          totalDebutPersonnel = snapshot.totaux.debutTotal;
-          totalSortiePersonnel = snapshot.totaux.sortieTotal;
-  
-          // 🆕 CORRECTION : Charger les transactions partenaires archivées pour HIER
-          console.log(`📦 [SUPERVISOR DASHBOARD] Chargement des transactions partenaires pour HIER...`);
-          
-          const yesterdayPartnerTransactions = await prisma.transaction.findMany({
-            where: {
-              destinataireId: superviseurId,
-              type: { in: ['DEPOT', 'RETRAIT'] },
-              OR: [
-                { partenaireId: { not: null } },
-                { partenaireNom: { not: null } }
-              ],
-              archived: true,
-              createdAt: dateFilter
-            },
-            select: {
-              type: true,
-              montant: true,
-              partenaireId: true,
-              partenaireNom: true,
-              partenaire: { select: { nomComplet: true } }
-            }
-          });
-  
-          console.log(`📊 [SUPERVISOR DASHBOARD] ${yesterdayPartnerTransactions.length} transactions partenaires trouvées pour HIER`);
-  
-          // Ajouter les transactions partenaires aux comptes
-          const partenaireTransactions = {};
-          yesterdayPartnerTransactions.forEach(tx => {
-            const partnerName = this.getPartnerDisplayName(tx);
-            
-            if (partnerName && partnerName !== 'Partenaire inconnu') {
-              const montant = this.convertFromInt(tx.montant);
-              
-              if (!partenaireTransactions[partnerName]) {
-                partenaireTransactions[partnerName] = { 
-                  depots: 0, 
-                  retraits: 0,
-                  isRegistered: !!tx.partenaireId
-                };
-              }
-              
-              if (tx.type === 'DEPOT') {
-                partenaireTransactions[partnerName].depots += montant;
-              } else if (tx.type === 'RETRAIT') {
-                partenaireTransactions[partnerName].retraits += montant;
-              }
-            }
-          });
-  
-          // Ajouter partenaires aux comptes ET totaux
-          Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
-            if (amounts.depots > 0) {
-              accountsByType.debut[`part-${partnerName}`] = amounts.depots;
-              totalDebutPersonnel += amounts.depots;
-            }
-            if (amounts.retraits > 0) {
-              accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
-              totalSortiePersonnel += amounts.retraits;
-            }
-          });
-  
-          console.log(`✅ [SUPERVISOR DASHBOARD] Totaux avec partenaires HIER: début=${totalDebutPersonnel} F, sortie=${totalSortiePersonnel} F`);
-          
-        } else {
-          console.log(`⚠️ [SUPERVISOR DASHBOARD] Pas de snapshot, fallback previousInitialBalance`);
-          
-          supervisor.accounts.forEach(account => {
-            const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
-            const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
-            
-            accountsByType.debut[account.type] = ancienDebutHier;
-            accountsByType.sortie[account.type] = ancienneSortieHier;
-            
-            totalDebutPersonnel += ancienDebutHier;
-            totalSortiePersonnel += ancienneSortieHier;
-          });
-        }
-      } else {
-        // ✅ DONNÉES ACTUELLES (TODAY)
-        console.log(`📊 [SUPERVISOR DASHBOARD] Chargement données actuelles pour ${supervisor.nomComplet}`);
-        
-        supervisor.accounts.forEach(account => {
-          const initial = this.convertFromInt(account.initialBalance || 0);
-          const current = this.convertFromInt(account.balance || 0);
-  
-          accountsByType.debut[account.type] = initial;
-          accountsByType.sortie[account.type] = current;
-          
-          totalDebutPersonnel += initial;
-          totalSortiePersonnel += current;
+          orderBy: { createdAt: 'desc' },
+          take: 20
         });
-  
-        // 🆕 CORRECTION : Traitement partenaires UNIQUEMENT pour today
+        
+        console.log(`🔍 [DEBUG] Total transactions partenaires (toutes): ${allPartnerTransactions.length}`);
+        
+        if (allPartnerTransactions.length > 0) {
+          console.log(`🔍 [DEBUG] Dernières transactions partenaires:`);
+          allPartnerTransactions.forEach(tx => {
+            const isInYesterdayRange = tx.createdAt >= startOfYesterday && tx.createdAt <= endOfYesterday;
+            console.log(`   - ${tx.type} ${this.convertFromInt(tx.montant)} F`);
+            console.log(`     createdAt: ${tx.createdAt.toISOString()} (dans range HIER: ${isInYesterdayRange})`);
+            console.log(`     archived: ${tx.archived}, archivedAt: ${tx.archivedAt?.toISOString() || 'null'}`);
+            console.log(`     partenaire: ${tx.partenaire?.nomComplet || tx.partenaireNom || 'INCONNU'}`);
+          });
+        }
+        
+        // Vérifier les transactions archivées spécifiquement
+        const archivedOnlyCount = allPartnerTransactions.filter(tx => tx.archived === true).length;
+        const notArchivedCount = allPartnerTransactions.filter(tx => !tx.archived).length;
+        console.log(`🔍 [DEBUG] Archivées: ${archivedOnlyCount}, Non-archivées: ${notArchivedCount}`);
+        
+        const yesterdayPartnerTransactions = await prisma.transaction.findMany({
+          where: {
+            destinataireId: superviseurId,
+            type: { in: ['DEPOT', 'RETRAIT'] },
+            OR: [
+              { partenaireId: { not: null } },
+              { partenaireNom: { not: null } }
+            ],
+            // ✅ FIX : Ne PAS filtrer par archived - juste par date
+            // Les transactions partenaires peuvent être archived OU non
+            createdAt: {
+              gte: startOfYesterday,
+              lte: endOfYesterday
+            }
+          },
+          select: {
+            id: true,
+            type: true,
+            montant: true,
+            partenaireId: true,
+            partenaireNom: true,
+            createdAt: true,
+            archived: true,
+            partenaire: { select: { nomComplet: true } }
+          }
+        });
+
+        console.log(`📊 [SUPERVISOR DASHBOARD] ${yesterdayPartnerTransactions.length} transactions partenaires trouvées pour HIER`);
+        
+        if (yesterdayPartnerTransactions.length > 0) {
+          console.log(`🔍 [DEBUG] Détail des transactions HIER:`);
+          yesterdayPartnerTransactions.forEach(tx => {
+            console.log(`   - ${tx.type} ${this.convertFromInt(tx.montant)} F à ${tx.createdAt.toISOString()}`);
+            console.log(`     partenaire: ${tx.partenaire?.nomComplet || tx.partenaireNom || 'INCONNU'}`);
+          });
+        }
+
+        // Ajouter les transactions partenaires aux comptes
         const partenaireTransactions = {};
-        allTransactions.forEach(tx => {
+        yesterdayPartnerTransactions.forEach(tx => {
           const partnerName = this.getPartnerDisplayName(tx);
           
           if (partnerName && partnerName !== 'Partenaire inconnu') {
@@ -1882,14 +1885,14 @@ async forceReset(adminId = 'vercel-cron') {
               };
             }
             
-            if (tx.type === 'DEPOT' && tx.destinataireId === superviseurId) {
+            if (tx.type === 'DEPOT') {
               partenaireTransactions[partnerName].depots += montant;
-            } else if (tx.type === 'RETRAIT' && tx.destinataireId === superviseurId) {
+            } else if (tx.type === 'RETRAIT') {
               partenaireTransactions[partnerName].retraits += montant;
             }
           }
         });
-  
+
         // Ajouter partenaires aux comptes ET totaux
         Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
           if (amounts.depots > 0) {
@@ -1901,86 +1904,153 @@ async forceReset(adminId = 'vercel-cron') {
             totalSortiePersonnel += amounts.retraits;
           }
         });
-      }
-  
-      // UV MASTER global
-      let uvMasterDebut, uvMasterSortie;
-      if (snapshotDate) {
-        // 🆕 Utiliser previousInitialBalance pour hier
-        uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
-          total + this.convertFromInt(account.previousInitialBalance || 0), 0);
-        uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
-          total + this.convertFromInt(account.initialBalance || 0), 0);
+
+        console.log(`✅ [SUPERVISOR DASHBOARD] Totaux avec partenaires HIER: début=${totalDebutPersonnel} F, sortie=${totalSortiePersonnel} F`);
+        
       } else {
-        // Données actuelles
-        uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
-          total + this.convertFromInt(account.initialBalance || 0), 0);
-        uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
-          total + this.convertFromInt(account.balance || 0), 0);
+        console.log(`⚠️ [SUPERVISOR DASHBOARD] Pas de snapshot, fallback previousInitialBalance`);
+        
+        supervisor.accounts.forEach(account => {
+          const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
+          const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
+          
+          accountsByType.debut[account.type] = ancienDebutHier;
+          accountsByType.sortie[account.type] = ancienneSortieHier;
+          
+          totalDebutPersonnel += ancienDebutHier;
+          totalSortiePersonnel += ancienneSortieHier;
+        });
       }
-  
-      const grTotal = totalSortiePersonnel - totalDebutPersonnel;
-  
-      // 🆕 CORRECTION : Transactions récentes UNIQUEMENT pour today
-      const recentTransactions = snapshotDate ? [] : allTransactions.map(tx => {
-        let personne = '';
+    } else {
+      // ✅ DONNÉES ACTUELLES (TODAY)
+      console.log(`📊 [SUPERVISOR DASHBOARD] Chargement données actuelles pour ${supervisor.nomComplet}`);
+      
+      supervisor.accounts.forEach(account => {
+        const initial = this.convertFromInt(account.initialBalance || 0);
+        const current = this.convertFromInt(account.balance || 0);
+
+        accountsByType.debut[account.type] = initial;
+        accountsByType.sortie[account.type] = current;
         
-        if (tx.partenaireId || tx.partenaireNom) {
-          personne = `${this.getPartnerDisplayName(tx)} (Partenaire)`;
-        } else if (tx.envoyeurId === superviseurId) {
-          personne = tx.destinataire?.nomComplet || 'Destinataire inconnu';
-        } else if (tx.destinataireId === superviseurId) {
-          personne = tx.envoyeur?.nomComplet || 'Expéditeur inconnu';
-        }
-        
-        if (['DEBUT_JOURNEE', 'FIN_JOURNEE'].includes(tx.type)) {
-          personne = supervisor.nomComplet;
-        }
-  
-        return {
-          id: tx.id, type: tx.type, montant: this.convertFromInt(tx.montant),
-          description: tx.description, personne, createdAt: tx.createdAt,
-          envoyeurId: tx.envoyeurId, destinataireId: tx.destinataireId,
-          partenaireId: tx.partenaireId, 
-          partenaireNom: tx.partenaireNom,
-          archived: tx.archived
-        };
+        totalDebutPersonnel += initial;
+        totalSortiePersonnel += current;
       });
-  
-      return {
-        superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
-        period, customDate,
-        uvMaster: {
-          personal: { debut: uvMasterDebut, sortie: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F' },
-          total: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F'
-        },
-        comptes: accountsByType,
-        totaux: {
-          debutTotal: totalDebutPersonnel, sortieTotal: totalSortiePersonnel, grTotal,
-          formatted: {
-            debutTotal: totalDebutPersonnel.toLocaleString() + ' F',
-            sortieTotal: totalSortiePersonnel.toLocaleString() + ' F',
-            grTotal: this.formatAmount(grTotal, true)
+
+      // 🆕 CORRECTION : Traitement partenaires UNIQUEMENT pour today
+      const partenaireTransactions = {};
+      allTransactions.forEach(tx => {
+        const partnerName = this.getPartnerDisplayName(tx);
+        
+        if (partnerName && partnerName !== 'Partenaire inconnu') {
+          const montant = this.convertFromInt(tx.montant);
+          
+          if (!partenaireTransactions[partnerName]) {
+            partenaireTransactions[partnerName] = { 
+              depots: 0, 
+              retraits: 0,
+              isRegistered: !!tx.partenaireId
+            };
           }
-        },
-        recentTransactions,
-        dynamicConfig: {
-          period, customDate, resetConfig: this.getResetConfig(), includeArchived,
-          totalTransactionsFound: allTransactions.length,
-          partnerTransactionsFound: snapshotDate ? 'voir comptes part-*' : allTransactions.filter(tx => tx.partenaireId || tx.partenaireNom).length,
-          filterApplied: snapshotDate ? 'historical_snapshot' : 'current_live',
-          dataSource: snapshotDate ? 'historical_snapshot_with_archived_partners' : 'current_live',
-          snapshotDate: snapshotDate?.toISOString().split('T')[0],
-          cronStatus: 'Vercel CRON géré automatiquement',
-          note: snapshotDate ? 'Données historiques (suppressions/modifications n\'affectent que today) + transactions partenaires archivées' : 'Données en temps réel'
+          
+          if (tx.type === 'DEPOT' && tx.destinataireId === superviseurId) {
+            partenaireTransactions[partnerName].depots += montant;
+          } else if (tx.type === 'RETRAIT' && tx.destinataireId === superviseurId) {
+            partenaireTransactions[partnerName].retraits += montant;
+          }
         }
-      };
-  
-    } catch (error) {
-      console.error('❌ [SUPERVISOR DASHBOARD] Erreur getSupervisorDashboard:', error);
-      throw new Error('Erreur lors de la récupération du dashboard superviseur: ' + error.message);
+      });
+
+      // Ajouter partenaires aux comptes ET totaux
+      Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
+        if (amounts.depots > 0) {
+          accountsByType.debut[`part-${partnerName}`] = amounts.depots;
+          totalDebutPersonnel += amounts.depots;
+        }
+        if (amounts.retraits > 0) {
+          accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
+          totalSortiePersonnel += amounts.retraits;
+        }
+      });
     }
+
+    // UV MASTER global
+    let uvMasterDebut, uvMasterSortie;
+    if (snapshotDate) {
+      // 🆕 Utiliser previousInitialBalance pour hier
+      uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
+        total + this.convertFromInt(account.previousInitialBalance || 0), 0);
+      uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
+        total + this.convertFromInt(account.initialBalance || 0), 0);
+    } else {
+      // Données actuelles
+      uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
+        total + this.convertFromInt(account.initialBalance || 0), 0);
+      uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
+        total + this.convertFromInt(account.balance || 0), 0);
+    }
+
+    const grTotal = totalSortiePersonnel - totalDebutPersonnel;
+
+    // 🆕 CORRECTION : Transactions récentes UNIQUEMENT pour today
+    const recentTransactions = snapshotDate ? [] : allTransactions.map(tx => {
+      let personne = '';
+      
+      if (tx.partenaireId || tx.partenaireNom) {
+        personne = `${this.getPartnerDisplayName(tx)} (Partenaire)`;
+      } else if (tx.envoyeurId === superviseurId) {
+        personne = tx.destinataire?.nomComplet || 'Destinataire inconnu';
+      } else if (tx.destinataireId === superviseurId) {
+        personne = tx.envoyeur?.nomComplet || 'Expéditeur inconnu';
+      }
+      
+      if (['DEBUT_JOURNEE', 'FIN_JOURNEE'].includes(tx.type)) {
+        personne = supervisor.nomComplet;
+      }
+
+      return {
+        id: tx.id, type: tx.type, montant: this.convertFromInt(tx.montant),
+        description: tx.description, personne, createdAt: tx.createdAt,
+        envoyeurId: tx.envoyeurId, destinataireId: tx.destinataireId,
+        partenaireId: tx.partenaireId, 
+        partenaireNom: tx.partenaireNom,
+        archived: tx.archived
+      };
+    });
+
+    return {
+      superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
+      period, customDate,
+      uvMaster: {
+        personal: { debut: uvMasterDebut, sortie: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F' },
+        total: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F'
+      },
+      comptes: accountsByType,
+      totaux: {
+        debutTotal: totalDebutPersonnel, sortieTotal: totalSortiePersonnel, grTotal,
+        formatted: {
+          debutTotal: totalDebutPersonnel.toLocaleString() + ' F',
+          sortieTotal: totalSortiePersonnel.toLocaleString() + ' F',
+          grTotal: this.formatAmount(grTotal, true)
+        }
+      },
+      recentTransactions,
+      dynamicConfig: {
+        period, customDate, resetConfig: this.getResetConfig(), includeArchived,
+        totalTransactionsFound: allTransactions.length,
+        partnerTransactionsFound: snapshotDate ? 'voir comptes part-*' : allTransactions.filter(tx => tx.partenaireId || tx.partenaireNom).length,
+        filterApplied: snapshotDate ? 'historical_snapshot' : 'current_live',
+        dataSource: snapshotDate ? 'historical_snapshot_with_archived_partners' : 'current_live',
+        snapshotDate: snapshotDate?.toISOString().split('T')[0],
+        cronStatus: 'Vercel CRON géré automatiquement',
+        note: snapshotDate ? 'Données historiques (suppressions/modifications n\'affectent que today) + transactions partenaires archivées' : 'Données en temps réel'
+      }
+    };
+
+  } catch (error) {
+    console.error('❌ [SUPERVISOR DASHBOARD] Erreur getSupervisorDashboard:', error);
+    throw new Error('Erreur lors de la récupération du dashboard superviseur: ' + error.message);
   }
+}
 
   async getPartnerDashboard(partenaireId, period = 'today', customDate = null) {
     try {
