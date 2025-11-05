@@ -142,45 +142,58 @@ class AccountLineController {
   checkRecentTransactions = async (supervisorId, accountKey) => {
     try {
       const now = new Date();
-
+  
       console.log('🕐 [PERMISSIONS] Vérification fenêtre de suppression autorisée (1-30 min)');
-
+  
       let lastTransaction = null;
-
+  
       if (accountKey.startsWith('part-')) {
         const partnerName = accountKey.replace('part-', '');
-        const partner = await prisma.user.findFirst({
-          where: { nomComplet: partnerName, role: 'PARTENAIRE' }
+        
+        console.log(`🔍 [PERMISSIONS] Recherche dernière transaction pour partenaire "${partnerName}"`);
+  
+        // 🆕 Rechercher la dernière transaction (enregistrée OU nom libre)
+        const recentTransactions = await prisma.transaction.findMany({
+          where: {
+            destinataireId: supervisorId,
+            type: { in: ['DEPOT', 'RETRAIT'] },
+            OR: [
+              { archived: { equals: false } },
+              { archived: { equals: null } }
+            ],
+            // 🆕 RECHERCHE COMBINÉE
+            OR: [
+              // Cas 1 : Partenaire enregistré
+              {
+                partenaire: {
+                  nomComplet: partnerName,
+                  role: 'PARTENAIRE',
+                  status: 'ACTIVE'
+                }
+              },
+              // Cas 2 : Partenaire nom libre
+              {
+                partenaireNom: partnerName
+              }
+            ]
+          },
+          select: { id: true, createdAt: true, type: true },
+          orderBy: { createdAt: 'desc' },
+          take: 1
         });
-
-        if (partner) {
-          const recentTransactions = await prisma.transaction.findMany({
-            where: {
-              partenaireId: partner.id,
-              destinataireId: supervisorId,
-              type: { in: ['DEPOT', 'RETRAIT'] },
-              OR: [
-                { archived: { equals: false } },
-                { archived: { equals: null } }
-              ]
-            },
-            select: { id: true, createdAt: true, type: true },
-            orderBy: { createdAt: 'desc' },
-            take: 1
-          });
-
-          if (recentTransactions.length > 0) {
-            lastTransaction = recentTransactions[0];
-          }
+  
+        if (recentTransactions.length > 0) {
+          lastTransaction = recentTransactions[0];
         }
       } else {
+        // Logique existante pour comptes standards
         const account = await prisma.account.findFirst({
           where: {
             userId: supervisorId,
             type: accountKey
           }
         });
-
+  
         if (account) {
           const recentTransactions = await prisma.transaction.findMany({
             where: {
@@ -193,21 +206,21 @@ class AccountLineController {
             orderBy: { createdAt: 'desc' },
             take: 1
           });
-
+  
           if (recentTransactions.length > 0) {
             lastTransaction = recentTransactions[0];
           }
         }
       }
-
+  
       if (!lastTransaction) {
         console.log('✅ [PERMISSIONS] Aucune transaction trouvée - suppression autorisée');
         return false;
       }
-
+  
       const transactionTime = new Date(lastTransaction.createdAt);
       const ageInMinutes = Math.floor((now.getTime() - transactionTime.getTime()) / (1000 * 60));
-
+  
       console.log(`⏰ [PERMISSIONS] Dernière transaction il y a ${ageInMinutes} minute(s)`);
       
       if (ageInMinutes < 1) {
@@ -218,7 +231,7 @@ class AccountLineController {
           ageInMinutes
         };
       }
-
+  
       if (ageInMinutes > 30) {
         console.log('❌ [PERMISSIONS] Blocage : transaction trop ancienne (> 30 min)');
         return {
@@ -227,10 +240,10 @@ class AccountLineController {
           ageInMinutes
         };
       }
-
+  
       console.log('✅ [PERMISSIONS] Fenêtre de correction autorisée (1-30 min)');
       return false;
-
+  
     } catch (error) {
       console.error('❌ [PERMISSIONS] Erreur checkRecentTransactions:', error);
       return false;
@@ -241,37 +254,41 @@ class AccountLineController {
     try {
       const partnerName = accountKey.replace('part-', '');
       const transactionType = lineType === 'debut' ? 'DEPOT' : 'RETRAIT';
-
-      const partner = await prisma.user.findFirst({
-        where: { 
-          nomComplet: partnerName, 
-          role: 'PARTENAIRE',
-          status: 'ACTIVE'
-        }
-      });
-
-      if (!partner) {
-        console.log(`⚠️ [PERMISSIONS] Partenaire "${partnerName}" non trouvé`);
-        return false;
-      }
-
+  
+      console.log(`🔍 [PERMISSIONS] Vérification ownership pour "${partnerName}" (type: ${transactionType})`);
+  
+      // 🆕 Compter TOUTES les transactions (enregistrées OU noms libres)
       const ownTransactions = await prisma.transaction.count({
         where: {
-          partenaireId: partner.id,
           destinataireId: supervisorId,
           type: transactionType,
           envoyeurId: supervisorId,
           OR: [
             { archived: { equals: false } },
             { archived: { equals: null } }
+          ],
+          // 🆕 RECHERCHE COMBINÉE
+          OR: [
+            // Cas 1 : Partenaire enregistré
+            {
+              partenaire: {
+                nomComplet: partnerName,
+                role: 'PARTENAIRE',
+                status: 'ACTIVE'
+              }
+            },
+            // Cas 2 : Partenaire nom libre
+            {
+              partenaireNom: partnerName
+            }
           ]
         }
       });
-
-      console.log(`🔍 [PERMISSIONS] Transactions ${transactionType} créées par superviseur ${supervisorId} pour ${partnerName}: ${ownTransactions}`);
+  
+      console.log(`🔍 [PERMISSIONS] ${ownTransactions} transaction(s) ${transactionType} trouvée(s) pour ${partnerName}`);
       
       return ownTransactions > 0;
-
+  
     } catch (error) {
       console.error('❌ [PERMISSIONS] Erreur checkSupervisorOwnTransactions:', error);
       return false;
@@ -459,90 +476,91 @@ class AccountLineController {
   deletePartnerAccountLine = async (supervisorId, lineType, accountKey, deletedBy) => {
     try {
       console.log('🗑️ [PARTNER DELETE] Début suppression:', { supervisorId, lineType, accountKey, deletedBy });
-
+  
       const partnerName = accountKey.replace('part-', '');
       
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
       const transactionType = lineType === 'debut' ? 'DEPOT' : 'RETRAIT';
-
-      const partnersWithSameName = await prisma.user.findMany({
-        where: { 
-          nomComplet: partnerName, 
-          role: 'PARTENAIRE',
-          status: 'ACTIVE'
-        },
-        select: { id: true, nomComplet: true, telephone: true }
-      });
-
-      console.log(`🔍 [PARTNER DELETE] ${partnersWithSameName.length} partenaire(s) trouvé(s) avec le nom "${partnerName}"`);
-
-      if (partnersWithSameName.length === 0) {
-        throw new Error(`Partenaire "${partnerName}" non trouvé`);
-      }
-
-      let targetPartner = null;
-      let transactions = [];
-
-      if (partnersWithSameName.length === 1) {
-        targetPartner = partnersWithSameName[0];
-      } else {
-        console.log('⚠️ [PARTNER DELETE] Plusieurs partenaires avec le même nom, recherche du bon partenaire...');
-        
-        for (const partner of partnersWithSameName) {
-          const partnerTransactions = await prisma.transaction.findMany({
-            where: {
-              partenaireId: partner.id,
-              destinataireId: supervisorId,
-              type: transactionType,
-              createdAt: { gte: yesterday },
-              OR: [
-                { archived: { equals: false } },
-                { archived: { equals: null } }
-              ]
+  
+      console.log(`🔍 [PARTNER DELETE] Recherche partenaire "${partnerName}" (enregistré OU nom libre)`);
+  
+      // 🆕 ÉTAPE 1 : Rechercher les transactions avec ce nom de partenaire
+      // Peut être soit un partenaire enregistré (partenaireId) soit un nom libre (partenaireNom)
+      const transactions = await prisma.transaction.findMany({
+        where: {
+          destinataireId: supervisorId,
+          type: transactionType,
+          createdAt: { gte: yesterday },
+          OR: [
+            { archived: { equals: false } },
+            { archived: { equals: null } }
+          ],
+          // 🆕 RECHERCHE COMBINÉE : partenaire enregistré OU nom libre
+          OR: [
+            // Cas 1 : Partenaire enregistré
+            {
+              partenaire: {
+                nomComplet: partnerName,
+                role: 'PARTENAIRE',
+                status: 'ACTIVE'
+              }
+            },
+            // Cas 2 : Partenaire nom libre
+            {
+              partenaireNom: partnerName
             }
-          });
-
-          if (partnerTransactions.length > 0) {
-            targetPartner = partner;
-            transactions = partnerTransactions;
-            console.log(`✅ [PARTNER DELETE] Partenaire trouvé: ${partner.nomComplet} (${partner.telephone}) avec ${partnerTransactions.length} transaction(s)`);
-            break;
+          ]
+        },
+        select: {
+          id: true,
+          montant: true,
+          type: true,
+          description: true,
+          createdAt: true,
+          partenaireId: true,
+          partenaireNom: true,
+          partenaire: {
+            select: { 
+              id: true, 
+              nomComplet: true, 
+              telephone: true 
+            }
           }
-        }
-
-        if (!targetPartner) {
-          console.log('⚠️ [PARTNER DELETE] Aucun partenaire avec transactions récentes, prise du premier');
-          targetPartner = partnersWithSameName[0];
-        }
-      }
-
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+  
+      console.log(`📊 [PARTNER DELETE] ${transactions.length} transaction(s) trouvée(s) pour ${partnerName}`);
+  
       if (transactions.length === 0) {
-        transactions = await prisma.transaction.findMany({
-          where: {
-            partenaireId: targetPartner.id,
-            destinataireId: supervisorId,
-            type: transactionType,
-            createdAt: { gte: yesterday },
-            OR: [
-              { archived: { equals: false } },
-              { archived: { equals: null } }
-            ]
-          },
-          orderBy: { createdAt: 'desc' }
-        });
+        throw new Error(`Aucune transaction ${transactionType} récente trouvée pour ${partnerName}`);
       }
-
-      console.log(`📊 [PARTNER DELETE] ${transactions.length} transaction(s) ${transactionType} trouvée(s) pour ${targetPartner.nomComplet}`);
-
-      if (transactions.length === 0) {
-        throw new Error(`Aucune transaction ${transactionType} récente trouvée pour ${partnerName}${partnersWithSameName.length > 1 ? ` (ID: ${targetPartner.id})` : ''}`);
-      }
-
+  
+      // 🆕 Identifier le type de partenaire
+      const firstTransaction = transactions[0];
+      const isRegisteredPartner = !!firstTransaction.partenaireId;
+      const partnerInfo = isRegisteredPartner 
+        ? {
+            id: firstTransaction.partenaire.id,
+            nom: firstTransaction.partenaire.nomComplet,
+            telephone: firstTransaction.partenaire.telephone,
+            type: 'ENREGISTRÉ'
+          }
+        : {
+            id: null,
+            nom: firstTransaction.partenaireNom,
+            telephone: null,
+            type: 'NOM LIBRE'
+          };
+  
+      console.log(`✅ [PARTNER DELETE] Type partenaire: ${partnerInfo.type}`, partnerInfo);
+  
       const totalValue = transactions.reduce((sum, tx) => sum + Number(tx.montant), 0) / 100;
       
       console.log(`💰 [PARTNER DELETE] Valeur totale à supprimer: ${totalValue} F`);
-
+  
+      // 🆕 Archiver toutes les transactions trouvées
       const updatePromises = transactions.map(transaction => 
         prisma.transaction.update({
           where: { id: transaction.id },
@@ -556,66 +574,73 @@ class AccountLineController {
               deletedAt: new Date().toISOString(),
               originalDescription: transaction.description,
               deletionReason: 'Suppression ligne partenaire depuis dashboard',
+              partnerType: partnerInfo.type,
+              partnerName: partnerInfo.nom,
               scope: 'TODAY_ONLY',
               historicalDataUntouched: true
             })
           }
         })
       );
-
+  
       await Promise.all(updatePromises);
-      console.log(`✅ [PARTNER DELETE] ${transactions.length} transaction(s) marquées comme supprimées`);
-
+      console.log(`✅ [PARTNER DELETE] ${transactions.length} transaction(s) archivées`);
+  
+      // 🆕 Créer l'audit avec les bonnes infos selon le type
       await prisma.transaction.create({
         data: {
           montant: BigInt(Math.round(totalValue * 100)),
           type: 'AUDIT_SUPPRESSION',
-          description: `Suppression transactions partenaire ${partnerName} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F - Affecte UNIQUEMENT TODAY`,
+          description: `Suppression transactions partenaire ${partnerInfo.nom} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F - Type: ${partnerInfo.type} - Affecte UNIQUEMENT TODAY`,
           envoyeurId: deletedBy,
           destinataireId: supervisorId,
-          partenaireId: targetPartner.id,
+          // 🆕 Ajouter partenaireId SEULEMENT si c'est un partenaire enregistré
+          ...(isRegisteredPartner && { partenaireId: partnerInfo.id }),
+          // 🆕 Ajouter partenaireNom pour les deux types (pour historique)
+          partenaireNom: partnerInfo.nom,
           metadata: JSON.stringify({
             action: 'DELETE_PARTNER_TRANSACTIONS',
             lineType,
-            partnerName: targetPartner.nomComplet,
-            partnerId: targetPartner.id,
-            partnerPhone: targetPartner.telephone,
+            partnerName: partnerInfo.nom,
+            partnerId: partnerInfo.id,
+            partnerPhone: partnerInfo.telephone,
+            partnerType: partnerInfo.type,
             transactionCount: transactions.length,
             totalValue,
             transactionType,
             transactionIds: transactions.map(t => t.id),
             deletedBy,
             deletedAt: new Date().toISOString(),
-            duplicateNamesFound: partnersWithSameName.length > 1,
             scope: 'TODAY_ONLY',
             historicalDataUntouched: true
           })
         }
       });
-
+  
       await NotificationService.createNotification({
         userId: supervisorId,
         title: 'Transactions partenaire supprimées',
-        message: `${transactions.length} transaction(s) ${transactionType} de ${partnerName} (${totalValue} F) ont été supprimées (affecte uniquement TODAY)`,
+        message: `${transactions.length} transaction(s) ${transactionType} de ${partnerInfo.nom} (${totalValue} F) ont été supprimées (affecte uniquement TODAY)`,
         type: 'AUDIT_SUPPRESSION'
       });
-
+  
       const result = {
-        partnerName: targetPartner.nomComplet,
-        partnerId: targetPartner.id,
-        partnerPhone: targetPartner.telephone,
+        partnerName: partnerInfo.nom,
+        partnerId: partnerInfo.id,
+        partnerPhone: partnerInfo.telephone,
+        partnerType: partnerInfo.type,
+        isRegisteredPartner,
         lineType,
         transactionType,
         transactionsDeleted: transactions.length,
         oldValue: totalValue,
         newValue: 0,
-        duplicateNamesHandled: partnersWithSameName.length > 1,
         scope: 'TODAY_ONLY'
       };
-
+  
       console.log('✅ [PARTNER DELETE] Suppression terminée avec succès:', result);
       return result;
-
+  
     } catch (error) {
       console.error('❌ [PARTNER DELETE] Erreur deletePartnerAccountLine:', error);
       throw error;
