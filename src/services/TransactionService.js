@@ -1108,6 +1108,71 @@ async migrateHistoricalDataToSnapshots(daysBack = 7) {
     }
     return 'Partenaire inconnu';
   }
+
+
+  filterUnusedAccounts(accountsByType) {
+    const filtered = { debut: {}, sortie: {} };
+    
+    // Liste des comptes à TOUJOURS afficher même si vides
+    const alwaysShow = ['LIQUIDE', 'ORANGE_MONEY', 'UV_MASTER'];
+    
+    // Types de comptes à masquer si vides (Wave, Autres)
+    const hideIfZero = ['WAVE', 'AUTRES'];
+    
+    // Filtrer les comptes de début
+    Object.entries(accountsByType.debut).forEach(([accountType, value]) => {
+      // Garder les partenaires
+      if (accountType.startsWith('part-')) {
+        filtered.debut[accountType] = value;
+        return;
+      }
+      
+      // Garder les comptes à toujours afficher
+      if (alwaysShow.includes(accountType)) {
+        filtered.debut[accountType] = value;
+        return;
+      }
+      
+      // Pour Wave et Autres : ne garder que si valeur non nulle
+      if (hideIfZero.includes(accountType)) {
+        const debutValue = value || 0;
+        const sortieValue = accountsByType.sortie[accountType] || 0;
+        
+        // Afficher seulement si au moins une des valeurs est non nulle
+        if (debutValue !== 0 || sortieValue !== 0) {
+          filtered.debut[accountType] = value;
+        }
+      }
+    });
+    
+    // Filtrer les comptes de sortie
+    Object.entries(accountsByType.sortie).forEach(([accountType, value]) => {
+      // Garder les partenaires
+      if (accountType.startsWith('part-')) {
+        filtered.sortie[accountType] = value;
+        return;
+      }
+      
+      // Garder les comptes à toujours afficher
+      if (alwaysShow.includes(accountType)) {
+        filtered.sortie[accountType] = value;
+        return;
+      }
+      
+      // Pour Wave et Autres : ne garder que si valeur non nulle
+      if (hideIfZero.includes(accountType)) {
+        const debutValue = accountsByType.debut[accountType] || 0;
+        const sortieValue = value || 0;
+        
+        // Afficher seulement si au moins une des valeurs est non nulle
+        if (debutValue !== 0 || sortieValue !== 0) {
+          filtered.sortie[accountType] = value;
+        }
+      }
+    });
+    
+    return filtered;
+  }
   async archivePartnerTransactionsDynamic() {
     try {
       const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
@@ -1609,7 +1674,7 @@ async forceReset(adminId = 'vercel-cron') {
           id: supervisor.id,
           nom: supervisor.nomComplet,
           status: supervisor.status,
-          comptes: accountsByType,
+          comptes: this.filterUnusedAccounts(accountsByType), 
           totaux: {
             debutTotal, sortieTotal, grTotal,
             formatted: {
@@ -2024,7 +2089,7 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
         personal: { debut: uvMasterDebut, sortie: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F' },
         total: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F'
       },
-      comptes: accountsByType,
+      comptes: this.filterUnusedAccounts(accountsByType),
       totaux: {
         debutTotal: totalDebutPersonnel, sortieTotal: totalSortiePersonnel, grTotal,
         formatted: {
