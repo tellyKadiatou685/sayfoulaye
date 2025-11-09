@@ -8,7 +8,7 @@ class TransactionService {
   // =====================================
  static RESET_CONFIG = {
   hour: 0,
-  minute: 0,
+  minute: 46,
   windowMinutes: 0
 };
 
@@ -1488,241 +1488,327 @@ async forceReset(adminId = 'vercel-cron') {
     return errors;
   }
   // =====================================
-  // MÉTHODES DASHBOARD SANS AUTO-RESET
-  async getAdminDashboard(period = 'today', customDate = null) {
-    try {
-      console.log(`📊 [ADMIN DASHBOARD] Période: ${period}, Date: ${customDate}`);
+ // =====================================
+// MÉTHODE COMPLÈTE CORRIGÉE : getAdminDashboard
+// À REMPLACER dans TransactionService.js (ligne ~1900)
+// =====================================
+
+async getAdminDashboard(period = 'today', customDate = null) {
+  try {
+    console.log(`📊 [ADMIN DASHBOARD] Période: ${period}, Date: ${customDate}`);
+    
+    const dateFilter = this.getDateFilter(period, customDate);
+    const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
+    
+    // Déterminer la date cible pour les snapshots
+    let snapshotDate = null;
+    if (includeArchived) {
+      if (period === 'yesterday') {
+        snapshotDate = new Date();
+        snapshotDate.setDate(snapshotDate.getDate() - 1);
+        snapshotDate.setHours(0, 0, 0, 0);
+      } else if (period === 'custom' && customDate) {
+        snapshotDate = new Date(customDate);
+        snapshotDate.setHours(0, 0, 0, 0);
+      }
+      console.log(`📸 [ADMIN DASHBOARD] Date snapshot cible: ${snapshotDate?.toISOString().split('T')[0]}`);
+    }
+    
+    let transactionFilter = { createdAt: dateFilter };
+
+    if (snapshotDate) {
+      console.log(`📋 [ADMIN DASHBOARD] Chargement transactions pour date avec snapshot`);
+    } else if (includeArchived && period === 'yesterday') {
+      const now = new Date();
+      const resetConfig = this.getResetConfig();
+      const todayResetTime = new Date(now);
+      todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
       
-      const dateFilter = this.getDateFilter(period, customDate);
-      const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
-      
-      // Déterminer la date cible pour les snapshots
-      let snapshotDate = null;
-      if (includeArchived) {
-        if (period === 'yesterday') {
-          snapshotDate = new Date();
-          snapshotDate.setDate(snapshotDate.getDate() - 1);
-          snapshotDate.setHours(0, 0, 0, 0);
-        } else if (period === 'custom' && customDate) {
-          snapshotDate = new Date(customDate);
-          snapshotDate.setHours(0, 0, 0, 0);
+      transactionFilter = {
+        ...transactionFilter,
+        archived: true,
+        archivedAt: {
+          gte: new Date(todayResetTime.getTime() - 60 * 1000),
+          lte: new Date(todayResetTime.getTime() + 10 * 60 * 1000)
         }
-        console.log(`📸 [ADMIN DASHBOARD] Date snapshot cible: ${snapshotDate?.toISOString().split('T')[0]}`);
-      }
-      
-      let transactionFilter = { createdAt: dateFilter };
-  
-      if (snapshotDate) {
-        console.log(`📋 [ADMIN DASHBOARD] Chargement transactions pour date avec snapshot`);
-      } else if (includeArchived && period === 'yesterday') {
-        const now = new Date();
-        const resetConfig = this.getResetConfig();
-        const todayResetTime = new Date(now);
-        todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
-        
-        transactionFilter = {
-          ...transactionFilter,
-          archived: true,
-          archivedAt: {
-            gte: new Date(todayResetTime.getTime() - 60 * 1000),
-            lte: new Date(todayResetTime.getTime() + 10 * 60 * 1000)
-          }
-        };
-      } else {
-        transactionFilter = {
-          ...transactionFilter,
-          OR: [
-            { archived: { equals: false } },
-            { archived: { equals: null } }
-          ]
-        };
-      }
-  
-      const supervisors = await prisma.user.findMany({
-        where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
-        select: {
-          id: true,
-          nomComplet: true,
-          status: true,
-          accounts: {
-            select: {
-              type: true,
-              balance: true,
-              initialBalance: true,
-              previousInitialBalance: true
-            }
-          },
-          transactionsRecues: {
-            where: transactionFilter,
-            select: {
-              id: true,
-              type: true,
-              montant: true,
-              partenaireId: true,
-              partenaireNom: true,
-              archived: true,
-              archivedAt: true,
-              createdAt: true,
-              partenaire: {
-                select: { nomComplet: true }
-              }
-            }
+      };
+    } else {
+      transactionFilter = {
+        ...transactionFilter,
+        OR: [
+          { archived: { equals: false } },
+          { archived: { equals: null } }
+        ]
+      };
+    }
+
+    const supervisors = await prisma.user.findMany({
+      where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
+      select: {
+        id: true,
+        nomComplet: true,
+        status: true,
+        accounts: {
+          select: {
+            type: true,
+            balance: true,
+            initialBalance: true,
+            previousInitialBalance: true
           }
         },
-        orderBy: { nomComplet: 'asc' }
-      });
-  
-      let totalDebutGlobal = 0, totalSortieGlobal = 0, uvMasterSolde = 0, uvMasterSorties = 0;
-  
-      const supervisorCards = await Promise.all(supervisors.map(async (supervisor) => {
-        const accountsByType = { debut: {}, sortie: {} };
-  
-        // CORRECTION : Charger les snapshots pour dates passées
-        if (snapshotDate) {
-          const snapshot = await this.getSnapshotForDate(supervisor.id, snapshotDate);
-          
-          if (snapshot) {
-            console.log(`📸 [DASHBOARD] ✅ Snapshot trouvé pour ${supervisor.nomComplet} le ${snapshotDate.toISOString().split('T')[0]}`);
-            
-            Object.assign(accountsByType.debut, snapshot.comptes.debut);
-            Object.assign(accountsByType.sortie, snapshot.comptes.sortie);
-            
-            if (snapshot.comptes.sortie.UV_MASTER) {
-              uvMasterSorties += snapshot.comptes.sortie.UV_MASTER;
-              uvMasterSolde += snapshot.comptes.debut.UV_MASTER;
+        transactionsRecues: {
+          where: transactionFilter,
+          select: {
+            id: true,
+            type: true,
+            montant: true,
+            partenaireId: true,
+            partenaireNom: true,
+            archived: true,
+            archivedAt: true,
+            createdAt: true,
+            metadata: true, // ✅ IMPORTANT : Charger metadata
+            partenaire: {
+              select: { nomComplet: true }
             }
-          } else {
-            console.log(`⚠️ [DASHBOARD] Pas de snapshot, fallback pour ${supervisor.nomComplet}`);
-            
-            supervisor.accounts.forEach(account => {
-              const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
-              const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
-              
-              accountsByType.debut[account.type] = ancienDebutHier;
-              accountsByType.sortie[account.type] = ancienneSortieHier;
-              
-              if (account.type === 'UV_MASTER') {
-                uvMasterSorties += ancienneSortieHier;
-                uvMasterSolde += ancienDebutHier;
-              }
-            });
+          }
+        }
+      },
+      orderBy: { nomComplet: 'asc' }
+    });
+
+    let totalDebutGlobal = 0, totalSortieGlobal = 0, uvMasterSolde = 0, uvMasterSorties = 0;
+
+    const supervisorCards = await Promise.all(supervisors.map(async (supervisor) => {
+      const accountsByType = { debut: {}, sortie: {} };
+
+      // ========================================
+      // SECTION 1 : CHARGEMENT DES COMPTES
+      // ========================================
+      if (snapshotDate) {
+        // CAS 1 : Date passée (hier ou custom passée)
+        const snapshot = await this.getSnapshotForDate(supervisor.id, snapshotDate);
+        
+        if (snapshot) {
+          console.log(`📸 [DASHBOARD] ✅ Snapshot trouvé pour ${supervisor.nomComplet} le ${snapshotDate.toISOString().split('T')[0]}`);
+          
+          Object.assign(accountsByType.debut, snapshot.comptes.debut);
+          Object.assign(accountsByType.sortie, snapshot.comptes.sortie);
+          
+          if (snapshot.comptes.sortie.UV_MASTER) {
+            uvMasterSorties += snapshot.comptes.sortie.UV_MASTER;
+            uvMasterSolde += snapshot.comptes.debut.UV_MASTER;
           }
         } else {
-          // CORRECTION : Données actuelles (today OU custom=aujourd'hui)
-          console.log(`📊 [DASHBOARD] Chargement données actuelles pour ${supervisor.nomComplet}`);
-          console.log(`📊 [DASHBOARD] Nombre de comptes: ${supervisor.accounts.length}`);
+          console.log(`⚠️ [DASHBOARD] Pas de snapshot, fallback previousInitialBalance pour ${supervisor.nomComplet}`);
           
           supervisor.accounts.forEach(account => {
-            const initial = this.convertFromInt(account.initialBalance || 0);
-            const current = this.convertFromInt(account.balance || 0);
+            const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
+            const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
             
-            console.log(`   - ${account.type}: début=${initial}, sortie=${current}`);
-            
-            accountsByType.debut[account.type] = initial;
-            accountsByType.sortie[account.type] = current;
+            accountsByType.debut[account.type] = ancienDebutHier;
+            accountsByType.sortie[account.type] = ancienneSortieHier;
             
             if (account.type === 'UV_MASTER') {
-              uvMasterSorties += current;
-              uvMasterSolde += initial;
+              uvMasterSorties += ancienneSortieHier;
+              uvMasterSolde += ancienDebutHier;
             }
           });
         }
-  
-        // Traitement partenaires
-        const partenaireTransactions = {};
-        supervisor.transactionsRecues.forEach(tx => {
-          const partnerName = this.getPartnerDisplayName(tx);
+      } else {
+        // CAS 2 : Données actuelles (today)
+        console.log(`📊 [DASHBOARD] Chargement données actuelles pour ${supervisor.nomComplet}`);
+        console.log(`📊 [DASHBOARD] Nombre de comptes: ${supervisor.accounts.length}`);
+        
+        supervisor.accounts.forEach(account => {
+          const initial = this.convertFromInt(account.initialBalance || 0);
+          const current = this.convertFromInt(account.balance || 0);
           
-          if (partnerName && partnerName !== 'Partenaire inconnu') {
-            const montant = this.convertFromInt(tx.montant);
-            
-            if (!partenaireTransactions[partnerName]) {
-              partenaireTransactions[partnerName] = { 
-                depots: 0, 
-                retraits: 0,
-                isRegistered: !!tx.partenaireId
-              };
-            }
-            
-            if (tx.type === 'DEPOT') {
-              partenaireTransactions[partnerName].depots += montant;
-            } else if (tx.type === 'RETRAIT') {
-              partenaireTransactions[partnerName].retraits += montant;
-            }
+          console.log(`   - ${account.type}: début=${initial}, sortie=${current}`);
+          
+          accountsByType.debut[account.type] = initial;
+          accountsByType.sortie[account.type] = current;
+          
+          if (account.type === 'UV_MASTER') {
+            uvMasterSorties += current;
+            uvMasterSolde += initial;
           }
         });
-  
-        Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
-          if (amounts.depots > 0) {
-            accountsByType.debut[`part-${partnerName}`] = amounts.depots;
+      }
+
+      // ========================================
+      // SECTION 2 : TRAITEMENT DES PARTENAIRES
+      // ========================================
+      
+      // ✅ CORRECTION : Filtrer les transactions supprimées
+      const activePartnerTransactions = this.filterDeletedTransactions(
+        supervisor.transactionsRecues, 
+        `ADMIN_DASHBOARD_${supervisor.nomComplet}`
+      );
+
+      const partenaireTransactions = {};
+      activePartnerTransactions.forEach(tx => {
+        const partnerName = this.getPartnerDisplayName(tx);
+        
+        if (partnerName && partnerName !== 'Partenaire inconnu') {
+          const montant = this.convertFromInt(tx.montant);
+          
+          if (!partenaireTransactions[partnerName]) {
+            partenaireTransactions[partnerName] = { 
+              depots: 0, 
+              retraits: 0,
+              isRegistered: !!tx.partenaireId
+            };
           }
-          if (amounts.retraits > 0) {
-            accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
+          
+          if (tx.type === 'DEPOT') {
+            partenaireTransactions[partnerName].depots += montant;
+          } else if (tx.type === 'RETRAIT') {
+            partenaireTransactions[partnerName].retraits += montant;
           }
-        });
-  
-        const debutTotal = Object.values(accountsByType.debut).reduce((sum, val) => sum + val, 0);
-        const sortieTotal = Object.values(accountsByType.sortie).reduce((sum, val) => sum + val, 0);
-        const grTotal = sortieTotal - debutTotal;
-  
-        totalDebutGlobal += debutTotal;
-        totalSortieGlobal += sortieTotal;
-  
-        console.log(`📊 [DASHBOARD] ${supervisor.nomComplet}: début=${debutTotal}, sortie=${sortieTotal}`);
-  
-        return {
-          id: supervisor.id,
-          nom: supervisor.nomComplet,
-          status: supervisor.status,
-          comptes: this.filterUnusedAccounts(accountsByType), 
-          totaux: {
-            debutTotal, sortieTotal, grTotal,
-            formatted: {
-              debutTotal: this.formatAmount(debutTotal),
-              sortieTotal: this.formatAmount(sortieTotal),
-              grTotal: this.formatAmount(grTotal, true)
-            }
-          }
-        };
-      }));
-  
-      const globalTotals = {
-        uvMaster: {
-          solde: uvMasterSolde, sorties: uvMasterSorties,
-          formatted: { solde: this.formatAmount(uvMasterSolde), sorties: this.formatAmount(uvMasterSorties) }
-        },
-        debutTotalGlobal: totalDebutGlobal, sortieTotalGlobal: totalSortieGlobal,
-        grTotalGlobal: totalSortieGlobal - totalDebutGlobal,
-        formatted: {
-          debutTotalGlobal: this.formatAmount(totalDebutGlobal),
-          sortieTotalGlobal: this.formatAmount(totalSortieGlobal),
-          grTotalGlobal: this.formatAmount(totalSortieGlobal - totalDebutGlobal, true)
         }
-      };
-  
+      });
+
+      // Ajouter les partenaires aux comptes
+      Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
+        if (amounts.depots > 0) {
+          accountsByType.debut[`part-${partnerName}`] = amounts.depots;
+        }
+        if (amounts.retraits > 0) {
+          accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
+        }
+      });
+
+      // ========================================
+      // SECTION 3 : CALCUL DES TOTAUX
+      // ========================================
+      const debutTotal = Object.values(accountsByType.debut).reduce((sum, val) => sum + val, 0);
+      const sortieTotal = Object.values(accountsByType.sortie).reduce((sum, val) => sum + val, 0);
+      const grTotal = sortieTotal - debutTotal;
+
+      totalDebutGlobal += debutTotal;
+      totalSortieGlobal += sortieTotal;
+
+      console.log(`📊 [DASHBOARD] ${supervisor.nomComplet}: début=${debutTotal}, sortie=${sortieTotal}, partenaires actifs=${Object.keys(partenaireTransactions).length}`);
+
       return {
-        period, customDate, globalTotals, supervisorCards,
-        dynamicConfig: {
-          resetConfig: this.getResetConfig(), includeArchived,
-          targetDateTime: customDate,
-          filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
-          dataSource: snapshotDate ? 'historical_snapshot' : 'current_live',
-          snapshotDate: snapshotDate?.toISOString().split('T')[0],
-          cronStatus: 'Vercel CRON géré automatiquement'
+        id: supervisor.id,
+        nom: supervisor.nomComplet,
+        status: supervisor.status,
+        comptes: this.filterUnusedAccounts(accountsByType), 
+        totaux: {
+          debutTotal, 
+          sortieTotal, 
+          grTotal,
+          formatted: {
+            debutTotal: this.formatAmount(debutTotal),
+            sortieTotal: this.formatAmount(sortieTotal),
+            grTotal: this.formatAmount(grTotal, true)
+          }
         }
       };
-  
-    } catch (error) {
-      console.error('Erreur getAdminDashboard:', error);
-      throw error;
-    }
+    }));
+
+    // ========================================
+    // SECTION 4 : TOTAUX GLOBAUX
+    // ========================================
+    const globalTotals = {
+      uvMaster: {
+        solde: uvMasterSolde, 
+        sorties: uvMasterSorties,
+        formatted: { 
+          solde: this.formatAmount(uvMasterSolde), 
+          sorties: this.formatAmount(uvMasterSorties) 
+        }
+      },
+      debutTotalGlobal: totalDebutGlobal, 
+      sortieTotalGlobal: totalSortieGlobal,
+      grTotalGlobal: totalSortieGlobal - totalDebutGlobal,
+      formatted: {
+        debutTotalGlobal: this.formatAmount(totalDebutGlobal),
+        sortieTotalGlobal: this.formatAmount(totalSortieGlobal),
+        grTotalGlobal: this.formatAmount(totalSortieGlobal - totalDebutGlobal, true)
+      }
+    };
+
+    console.log(`✅ [ADMIN DASHBOARD] Génération terminée - ${supervisorCards.length} superviseurs traités`);
+
+    return {
+      period, 
+      customDate, 
+      globalTotals, 
+      supervisorCards,
+      dynamicConfig: {
+        resetConfig: this.getResetConfig(), 
+        includeArchived,
+        targetDateTime: customDate,
+        filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
+        dataSource: snapshotDate ? 'historical_snapshot' : 'current_live',
+        snapshotDate: snapshotDate?.toISOString().split('T')[0],
+        cronStatus: 'Vercel CRON géré automatiquement',
+        deletedTransactionsFiltered: true // ✅ Indicateur de filtrage actif
+      }
+    };
+
+  } catch (error) {
+    console.error('❌ [ADMIN DASHBOARD] Erreur getAdminDashboard:', error);
+    throw error;
   }
+}
+
+// =====================================
+// HELPER : Filtrer les transactions supprimées
+// À AJOUTER juste après getAdminDashboard
+// =====================================
+
+/**
+ * Filtre les transactions en excluant celles marquées comme supprimées
+ * @param {Array} transactions - Liste des transactions à filtrer
+ * @param {String} context - Contexte pour les logs
+ * @returns {Array} - Transactions actives (non supprimées)
+ */
+filterDeletedTransactions(transactions, context = 'FILTER') {
+  if (!transactions || !Array.isArray(transactions)) {
+    console.warn(`⚠️ [${context}] Transactions invalides`, transactions);
+    return [];
+  }
+
+  const activeTransactions = transactions.filter(tx => {
+    // Pas de metadata = transaction valide
+    if (!tx.metadata) return true;
+    
+    try {
+      const metadata = typeof tx.metadata === 'string' 
+        ? JSON.parse(tx.metadata) 
+        : tx.metadata;
+      
+      // Exclure si marquée comme supprimée
+      if (metadata.deleted === true) {
+        console.log(`🚫 [${context}] Transaction ${tx.id} supprimée, exclue (deletedAt: ${metadata.deletedAt})`);
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      console.warn(`⚠️ [${context}] Erreur parsing metadata tx ${tx.id}:`, error);
+      return true; // En cas d'erreur, on garde la transaction par sécurité
+    }
+  });
+
+  const excludedCount = transactions.length - activeTransactions.length;
+  
+  if (excludedCount > 0) {
+    console.log(`🔍 [${context}] ${excludedCount} transaction(s) supprimée(s) exclue(s), ${activeTransactions.length} restante(s)`);
+  }
+
+  return activeTransactions;
+}
   
   // REMPLACER la section "Cas date passée sans snapshot" dans getSupervisorDashboard
-// À partir de la ligne ~2028 jusqu'à la ligne ~2178
-
-// REMPLACER COMPLÈTEMENT getSupervisorDashboard dans TransactionService.js
-// À partir de la ligne ~1900 environ
+// =====================================
+// MÉTHODE COMPLÈTE CORRIGÉE : getSupervisorDashboard
+// À REMPLACER dans TransactionService.js (ligne ~2100)
+// =====================================
 
 async getSupervisorDashboard(superviseurId, period = 'today', customDate = null) {
   try {
@@ -1731,7 +1817,7 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
     
     console.log(`📊 [SUPERVISOR DASHBOARD] Superviseur: ${superviseurId}, Period: ${period}, Include archived: ${includeArchived}`);
     
-    // 🆕 CORRECTION : Déterminer la date snapshot comme l'admin
+    // Déterminer la date snapshot
     let snapshotDate = null;
     if (includeArchived) {
       if (period === 'yesterday') {
@@ -1752,13 +1838,12 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
       console.log(`📸 [SUPERVISOR DASHBOARD] Date snapshot cible: ${snapshotDate?.toISOString().split('T')[0]}`);
     }
     
-    // Filtre transactions simplifié
+    // Filtre transactions
     let transactionFilter = { 
       createdAt: dateFilter,
       AND: [{ OR: [{ envoyeurId: superviseurId }, { destinataireId: superviseurId }] }]
     };
 
-    // 🆕 CORRECTION : Utiliser snapshots pour hier, pas les transactions archivées
     if (!snapshotDate) {
       // Données actuelles : exclure les transactions archivées
       transactionFilter = {
@@ -1767,41 +1852,64 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
       };
     }
 
+    // Charger les données
     const [supervisor, allTransactions, uvMasterAccounts] = await Promise.all([
       prisma.user.findUnique({
         where: { id: superviseurId },
         select: {
-          id: true, nomComplet: true, status: true,
+          id: true, 
+          nomComplet: true, 
+          status: true,
           accounts: {
             select: {
-              type: true, balance: true, initialBalance: true, previousInitialBalance: true
+              type: true, 
+              balance: true, 
+              initialBalance: true, 
+              previousInitialBalance: true
             }
           }
         }
       }),
-      // 🆕 CORRECTION : Ne charger les transactions que si pas de snapshot
+      // Ne charger les transactions que si pas de snapshot
       snapshotDate ? Promise.resolve([]) : prisma.transaction.findMany({
         where: transactionFilter,
         select: {
-          id: true, type: true, montant: true, description: true, createdAt: true,
-          envoyeurId: true, destinataireId: true, partenaireId: true, 
+          id: true, 
+          type: true, 
+          montant: true, 
+          description: true, 
+          createdAt: true,
+          envoyeurId: true, 
+          destinataireId: true, 
+          partenaireId: true, 
           partenaireNom: true,
           archived: true,
+          metadata: true, // ✅ IMPORTANT
           destinataire: { select: { nomComplet: true } },
           envoyeur: { select: { nomComplet: true } },
           partenaire: { select: { nomComplet: true } }
         },
-        orderBy: { createdAt: 'desc' }, take: 50
+        orderBy: { createdAt: 'desc' }, 
+        take: 50
       }),
       prisma.account.findMany({
-        where: { type: 'UV_MASTER', user: { role: 'SUPERVISEUR', status: 'ACTIVE' } },
-        select: { balance: true, initialBalance: true, previousInitialBalance: true }
+        where: { 
+          type: 'UV_MASTER', 
+          user: { role: 'SUPERVISEUR', status: 'ACTIVE' } 
+        },
+        select: { 
+          balance: true, 
+          initialBalance: true, 
+          previousInitialBalance: true 
+        }
       })
     ]);
 
     if (!supervisor) throw new Error('Superviseur non trouvé');
 
-    // 🆕 CORRECTION : Cas date passée sans snapshot (comme admin)
+    // ========================================
+    // CAS SPÉCIAL : Date passée sans snapshot
+    // ========================================
     if (snapshotDate && allTransactions.length === 0) {
       const snapshot = await this.getSnapshotForDate(superviseurId, snapshotDate);
       
@@ -1809,19 +1917,40 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
         console.log(`⚠️ [SUPERVISOR DASHBOARD] Pas de snapshot pour ${snapshotDate.toISOString().split('T')[0]}`);
         
         return {
-          superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
-          period, customDate,
-          uvMaster: { personal: { debut: 0, sortie: 0, formatted: "0 F" }, total: 0, formatted: "0 F" },
+          superviseur: { 
+            id: supervisor.id, 
+            nom: supervisor.nomComplet, 
+            status: supervisor.status 
+          },
+          period, 
+          customDate,
+          uvMaster: { 
+            personal: { debut: 0, sortie: 0, formatted: "0 F" }, 
+            total: 0, 
+            formatted: "0 F" 
+          },
           comptes: { debut: {}, sortie: {} },
           totaux: {
-            debutTotal: 0, sortieTotal: 0, grTotal: 0,
-            formatted: { debutTotal: "0 F", sortieTotal: "0 F", grTotal: "0 F" }
+            debutTotal: 0, 
+            sortieTotal: 0, 
+            grTotal: 0,
+            formatted: { 
+              debutTotal: "0 F", 
+              sortieTotal: "0 F", 
+              grTotal: "0 F" 
+            }
           },
           recentTransactions: [],
           dynamicConfig: {
-            period, customDate, resetConfig: this.getResetConfig(), includeArchived,
-            totalTransactionsFound: 0, filterApplied: 'snapshot_not_found', 
-            dataSource: 'no_data', snapshotDate: snapshotDate.toISOString().split('T')[0]
+            period, 
+            customDate, 
+            resetConfig: this.getResetConfig(), 
+            includeArchived,
+            totalTransactionsFound: 0, 
+            filterApplied: 'snapshot_not_found', 
+            dataSource: 'no_data', 
+            snapshotDate: snapshotDate.toISOString().split('T')[0],
+            deletedTransactionsFiltered: false
           }
         };
       }
@@ -1830,9 +1959,11 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
     const accountsByType = { debut: {}, sortie: {} };
     let totalDebutPersonnel = 0, totalSortiePersonnel = 0;
 
-    // 🆕 CORRECTION : Logique comptes identique à l'admin
+    // ========================================
+    // SECTION 1 : CHARGEMENT DES COMPTES
+    // ========================================
     if (snapshotDate) {
-      // ✅ DONNÉES HISTORIQUES VIA SNAPSHOT
+      // CAS 1 : DONNÉES HISTORIQUES VIA SNAPSHOT
       const snapshot = await this.getSnapshotForDate(superviseurId, snapshotDate);
       
       if (snapshot) {
@@ -1845,59 +1976,15 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
         totalDebutPersonnel = snapshot.totaux.debutTotal;
         totalSortiePersonnel = snapshot.totaux.sortieTotal;
 
-        // 🆕 CORRECTION CRITIQUE : Charger les transactions partenaires archivées pour HIER
+        // ========================================
+        // ✅ CORRECTION CRITIQUE : Charger les transactions partenaires pour HIER
+        // ========================================
         console.log(`📦 [SUPERVISOR DASHBOARD] Chargement des transactions partenaires pour HIER...`);
-        console.log(`🔍 [DEBUG] superviseurId: ${superviseurId}`);
-        console.log(`🔍 [DEBUG] period: ${period}`);
         
-        // ✅ FIX : Utiliser getYesterdayRange() pour avoir la plage exacte
         const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
         
-
-        // 🔍 DEBUG DÉTAILLÉ : Vérifier TOUTES les transactions partenaires de ce superviseur
-        const allPartnerTransactions = await prisma.transaction.findMany({
-          where: {
-            destinataireId: superviseurId,
-            type: { in: ['DEPOT', 'RETRAIT'] },
-            OR: [
-              { partenaireId: { not: null } },
-              { partenaireNom: { not: null } }
-            ]
-          },
-          select: {
-            id: true,
-            type: true,
-            montant: true,
-            partenaireId: true,
-            partenaireNom: true,
-            createdAt: true,
-            archived: true,
-            archivedAt: true,
-            partenaire: { select: { nomComplet: true } }
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 20
-        });
-        
-        console.log(`🔍 [DEBUG] Total transactions partenaires (toutes): ${allPartnerTransactions.length}`);
-        
-        if (allPartnerTransactions.length > 0) {
-          console.log(`🔍 [DEBUG] Dernières transactions partenaires:`);
-          allPartnerTransactions.forEach(tx => {
-            const isInYesterdayRange = tx.createdAt >= startOfYesterday && tx.createdAt <= endOfYesterday;
-            console.log(`   - ${tx.type} ${this.convertFromInt(tx.montant)} F`);
-            console.log(`     createdAt: ${tx.createdAt.toISOString()} (dans range HIER: ${isInYesterdayRange})`);
-            console.log(`     archived: ${tx.archived}, archivedAt: ${tx.archivedAt?.toISOString() || 'null'}`);
-            console.log(`     partenaire: ${tx.partenaire?.nomComplet || tx.partenaireNom || 'INCONNU'}`);
-          });
-        }
-        
-        // Vérifier les transactions archivées spécifiquement
-        const archivedOnlyCount = allPartnerTransactions.filter(tx => tx.archived === true).length;
-        const notArchivedCount = allPartnerTransactions.filter(tx => !tx.archived).length;
-        console.log(`🔍 [DEBUG] Archivées: ${archivedOnlyCount}, Non-archivées: ${notArchivedCount}`);
-        
-        const yesterdayPartnerTransactions = await prisma.transaction.findMany({
+        // Charger TOUTES les transactions partenaires d'hier
+        const allYesterdayPartnerTransactions = await prisma.transaction.findMany({
           where: {
             destinataireId: superviseurId,
             type: { in: ['DEPOT', 'RETRAIT'] },
@@ -1905,8 +1992,6 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
               { partenaireId: { not: null } },
               { partenaireNom: { not: null } }
             ],
-            // ✅ FIX : Ne PAS filtrer par archived - juste par date
-            // Les transactions partenaires peuvent être archived OU non
             createdAt: {
               gte: startOfYesterday,
               lte: endOfYesterday
@@ -1920,14 +2005,23 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
             partenaireNom: true,
             createdAt: true,
             archived: true,
+            metadata: true, // ✅ CRITIQUE
             partenaire: { select: { nomComplet: true } }
           }
         });
 
-        console.log(`📊 [SUPERVISOR DASHBOARD] ${yesterdayPartnerTransactions.length} transactions partenaires trouvées pour HIER`);
-        
+        console.log(`📊 [SUPERVISOR DASHBOARD] ${allYesterdayPartnerTransactions.length} transactions partenaires trouvées pour HIER (avant filtrage)`);
+
+        // ✅ FILTRER les transactions supprimées
+        const yesterdayPartnerTransactions = this.filterDeletedTransactions(
+          allYesterdayPartnerTransactions, 
+          `SUPERVISOR_DASHBOARD_HIER_${supervisor.nomComplet}`
+        );
+
+        console.log(`📊 [SUPERVISOR DASHBOARD] ${yesterdayPartnerTransactions.length} transactions partenaires actives pour HIER (après filtrage)`);
+
         if (yesterdayPartnerTransactions.length > 0) {
-          console.log(`🔍 [DEBUG] Détail des transactions HIER:`);
+          console.log(`🔍 [DEBUG] Détail des transactions HIER non supprimées:`);
           yesterdayPartnerTransactions.forEach(tx => {
             console.log(`   - ${tx.type} ${this.convertFromInt(tx.montant)} F à ${tx.createdAt.toISOString()}`);
             console.log(`     partenaire: ${tx.partenaire?.nomComplet || tx.partenaireNom || 'INCONNU'}`);
@@ -1987,7 +2081,7 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
         });
       }
     } else {
-      // ✅ DONNÉES ACTUELLES (TODAY)
+      // CAS 2 : DONNÉES ACTUELLES (TODAY)
       console.log(`📊 [SUPERVISOR DASHBOARD] Chargement données actuelles pour ${supervisor.nomComplet}`);
       
       supervisor.accounts.forEach(account => {
@@ -2001,9 +2095,14 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
         totalSortiePersonnel += current;
       });
 
-      // 🆕 CORRECTION : Traitement partenaires UNIQUEMENT pour today
+      // ✅ TRAITEMENT PARTENAIRES TODAY (avec filtrage)
+      const activeTransactions = this.filterDeletedTransactions(
+        allTransactions, 
+        `SUPERVISOR_DASHBOARD_TODAY_${supervisor.nomComplet}`
+      );
+
       const partenaireTransactions = {};
-      allTransactions.forEach(tx => {
+      activeTransactions.forEach(tx => {
         const partnerName = this.getPartnerDisplayName(tx);
         
         if (partnerName && partnerName !== 'Partenaire inconnu') {
@@ -2038,10 +2137,12 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
       });
     }
 
-    // UV MASTER global
+    // ========================================
+    // SECTION 2 : UV MASTER GLOBAL
+    // ========================================
     let uvMasterDebut, uvMasterSortie;
     if (snapshotDate) {
-      // 🆕 Utiliser previousInitialBalance pour hier
+      // Utiliser previousInitialBalance pour hier
       uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
         total + this.convertFromInt(account.previousInitialBalance || 0), 0);
       uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
@@ -2056,8 +2157,13 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
 
     const grTotal = totalSortiePersonnel - totalDebutPersonnel;
 
-    // 🆕 CORRECTION : Transactions récentes UNIQUEMENT pour today
-    const recentTransactions = snapshotDate ? [] : allTransactions.map(tx => {
+    // ========================================
+    // SECTION 3 : TRANSACTIONS RÉCENTES
+    // ========================================
+    const recentTransactions = snapshotDate ? [] : this.filterDeletedTransactions(
+      allTransactions, 
+      `SUPERVISOR_RECENT_${supervisor.nomComplet}`
+    ).map(tx => {
       let personne = '';
       
       if (tx.partenaireId || tx.partenaireNom) {
@@ -2073,9 +2179,14 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
       }
 
       return {
-        id: tx.id, type: tx.type, montant: this.convertFromInt(tx.montant),
-        description: tx.description, personne, createdAt: tx.createdAt,
-        envoyeurId: tx.envoyeurId, destinataireId: tx.destinataireId,
+        id: tx.id, 
+        type: tx.type, 
+        montant: this.convertFromInt(tx.montant),
+        description: tx.description, 
+        personne, 
+        createdAt: tx.createdAt,
+        envoyeurId: tx.envoyeurId, 
+        destinataireId: tx.destinataireId,
         partenaireId: tx.partenaireId, 
         partenaireNom: tx.partenaireNom,
         archived: tx.archived
@@ -2083,15 +2194,27 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
     });
 
     return {
-      superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
-      period, customDate,
+      superviseur: { 
+        id: supervisor.id, 
+        nom: supervisor.nomComplet, 
+        status: supervisor.status 
+      },
+      period, 
+      customDate,
       uvMaster: {
-        personal: { debut: uvMasterDebut, sortie: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F' },
-        total: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F'
+        personal: { 
+          debut: uvMasterDebut, 
+          sortie: uvMasterSortie, 
+          formatted: uvMasterSortie.toLocaleString() + ' F' 
+        },
+        total: uvMasterSortie, 
+        formatted: uvMasterSortie.toLocaleString() + ' F'
       },
       comptes: this.filterUnusedAccounts(accountsByType),
       totaux: {
-        debutTotal: totalDebutPersonnel, sortieTotal: totalSortiePersonnel, grTotal,
+        debutTotal: totalDebutPersonnel, 
+        sortieTotal: totalSortiePersonnel, 
+        grTotal,
         formatted: {
           debutTotal: totalDebutPersonnel.toLocaleString() + ' F',
           sortieTotal: totalSortiePersonnel.toLocaleString() + ' F',
@@ -2100,14 +2223,20 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
       },
       recentTransactions,
       dynamicConfig: {
-        period, customDate, resetConfig: this.getResetConfig(), includeArchived,
+        period, 
+        customDate, 
+        resetConfig: this.getResetConfig(), 
+        includeArchived,
         totalTransactionsFound: allTransactions.length,
         partnerTransactionsFound: snapshotDate ? 'voir comptes part-*' : allTransactions.filter(tx => tx.partenaireId || tx.partenaireNom).length,
         filterApplied: snapshotDate ? 'historical_snapshot' : 'current_live',
         dataSource: snapshotDate ? 'historical_snapshot_with_archived_partners' : 'current_live',
         snapshotDate: snapshotDate?.toISOString().split('T')[0],
         cronStatus: 'Vercel CRON géré automatiquement',
-        note: snapshotDate ? 'Données historiques (suppressions/modifications n\'affectent que today) + transactions partenaires archivées' : 'Données en temps réel'
+        deletedTransactionsFiltered: true, // ✅ Indicateur de filtrage actif
+        note: snapshotDate 
+          ? 'Données historiques (suppressions n\'affectent que today) + transactions partenaires filtrées' 
+          : 'Données en temps réel avec transactions supprimées exclues'
       }
     };
 

@@ -3,7 +3,6 @@ import prisma from '../config/database.js';
 import NotificationService from '../services/NotificationService.js';
 
 class AccountLineController {
-  
   deleteAccountLine = async (req, res) => {
     try {
       const { supervisorId, lineType } = req.params;
@@ -47,6 +46,18 @@ class AccountLineController {
         userId
       );
 
+      // 🆕 CRITIQUE : Recréer le snapshot d'aujourd'hui après suppression
+      console.log('📸 [CONTROLLER] Recréation du snapshot après suppression...');
+      try {
+        const { default: TransactionService } = await import('../services/TransactionService.js');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        await TransactionService.createDailySnapshot(supervisorId, today);
+        console.log('✅ [CONTROLLER] Snapshot TODAY recréé avec nouvelles valeurs');
+      } catch (snapshotError) {
+        console.error('⚠️ [CONTROLLER] Erreur snapshot (non-bloquante):', snapshotError);
+      }
+
       res.json({
         success: true,
         message: `Ligne ${accountKey} (${lineType}) supprimée avec succès`,
@@ -76,6 +87,7 @@ class AccountLineController {
       });
     }
   }
+
 
   checkDeletePermissions = async (user, supervisorId, accountKey) => {
     try {
@@ -473,179 +485,225 @@ class AccountLineController {
     }
   }
 
-  deletePartnerAccountLine = async (supervisorId, lineType, accountKey, deletedBy) => {
-    try {
-      console.log('🗑️ [PARTNER DELETE] Début suppression:', { supervisorId, lineType, accountKey, deletedBy });
-  
-      const partnerName = accountKey.replace('part-', '');
-      
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const transactionType = lineType === 'debut' ? 'DEPOT' : 'RETRAIT';
-  
-      console.log(`🔍 [PARTNER DELETE] Recherche partenaire "${partnerName}" (enregistré OU nom libre)`);
-  
-      // 🆕 ÉTAPE 1 : Rechercher les transactions avec ce nom de partenaire
-      // Peut être soit un partenaire enregistré (partenaireId) soit un nom libre (partenaireNom)
-      const transactions = await prisma.transaction.findMany({
-        where: {
-          destinataireId: supervisorId,
-          type: transactionType,
-          createdAt: { gte: yesterday },
-          OR: [
-            { archived: { equals: false } },
-            { archived: { equals: null } }
-          ],
-          // 🆕 RECHERCHE COMBINÉE : partenaire enregistré OU nom libre
-          OR: [
-            // Cas 1 : Partenaire enregistré
-            {
-              partenaire: {
-                nomComplet: partnerName,
-                role: 'PARTENAIRE',
-                status: 'ACTIVE'
-              }
-            },
-            // Cas 2 : Partenaire nom libre
-            {
-              partenaireNom: partnerName
+ // CORRECTION CRITIQUE : deletePartnerAccountLine
+// À remplacer dans AccountLineController.js ligne ~300
+
+// CORRECTION CRITIQUE : deletePartnerAccountLine
+// À remplacer dans AccountLineController.js ligne ~300
+
+// CORRECTION COMPLÈTE : deletePartnerAccountLine dans AccountLineController.js
+// Remplacer la méthode existante à partir de la ligne ~300
+
+deletePartnerAccountLine = async (supervisorId, lineType, accountKey, deletedBy) => {
+  try {
+    console.log('🗑️ [PARTNER DELETE] Début suppression:', { 
+      supervisorId, 
+      lineType, 
+      accountKey, 
+      deletedBy 
+    });
+
+    const partnerName = accountKey.replace('part-', '');
+    const transactionType = lineType === 'debut' ? 'DEPOT' : 'RETRAIT';
+
+    console.log(`🔍 [PARTNER DELETE] Recherche partenaire "${partnerName}" (enregistré OU nom libre)`);
+
+    // ✅ CORRECTION 1 : Rechercher TOUTES les transactions (archivées ou non)
+    const allTransactions = await prisma.transaction.findMany({
+      where: {
+        destinataireId: supervisorId,
+        type: transactionType,
+        OR: [
+          // Partenaire enregistré
+          {
+            partenaire: {
+              nomComplet: partnerName,
+              role: 'PARTENAIRE',
+              status: 'ACTIVE'
             }
-          ]
-        },
-        select: {
-          id: true,
-          montant: true,
-          type: true,
-          description: true,
-          createdAt: true,
-          partenaireId: true,
-          partenaireNom: true,
-          partenaire: {
-            select: { 
-              id: true, 
-              nomComplet: true, 
-              telephone: true 
-            }
+          },
+          // Partenaire nom libre
+          {
+            partenaireNom: partnerName
           }
-        },
-        orderBy: { createdAt: 'desc' }
-      });
-  
-      console.log(`📊 [PARTNER DELETE] ${transactions.length} transaction(s) trouvée(s) pour ${partnerName}`);
-  
-      if (transactions.length === 0) {
-        throw new Error(`Aucune transaction ${transactionType} récente trouvée pour ${partnerName}`);
+        ]
+      },
+      select: {
+        id: true,
+        montant: true,
+        type: true,
+        description: true,
+        createdAt: true,
+        archived: true,
+        archivedAt: true,
+        partenaireId: true,
+        partenaireNom: true,
+        metadata: true,
+        partenaire: {
+          select: { 
+            id: true, 
+            nomComplet: true, 
+            telephone: true 
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    console.log(`📊 [PARTNER DELETE] ${allTransactions.length} transaction(s) trouvée(s) au total`);
+
+    // ✅ CORRECTION 2 : Filtrer en JavaScript pour exclure celles déjà supprimées
+    const transactions = allTransactions.filter(tx => {
+      if (!tx.metadata) return true;
+      
+      try {
+        const metadata = typeof tx.metadata === 'string' 
+          ? JSON.parse(tx.metadata) 
+          : tx.metadata;
+        
+        // Exclure si déjà marquée comme supprimée
+        if (metadata.deleted === true) {
+          console.log(`🚫 [FILTER] Transaction ${tx.id} déjà supprimée, ignorée`);
+          return false;
+        }
+        
+        return true;
+      } catch (error) {
+        console.warn(`⚠️ [FILTER] Erreur parsing metadata tx ${tx.id}:`, error);
+        return true;
       }
-  
-      // 🆕 Identifier le type de partenaire
-      const firstTransaction = transactions[0];
-      const isRegisteredPartner = !!firstTransaction.partenaireId;
-      const partnerInfo = isRegisteredPartner 
-        ? {
-            id: firstTransaction.partenaire.id,
-            nom: firstTransaction.partenaire.nomComplet,
-            telephone: firstTransaction.partenaire.telephone,
-            type: 'ENREGISTRÉ'
-          }
-        : {
-            id: null,
-            nom: firstTransaction.partenaireNom,
-            telephone: null,
-            type: 'NOM LIBRE'
-          };
-  
-      console.log(`✅ [PARTNER DELETE] Type partenaire: ${partnerInfo.type}`, partnerInfo);
-  
-      const totalValue = transactions.reduce((sum, tx) => sum + Number(tx.montant), 0) / 100;
-      
-      console.log(`💰 [PARTNER DELETE] Valeur totale à supprimer: ${totalValue} F`);
-  
-      // 🆕 Archiver toutes les transactions trouvées
-      const updatePromises = transactions.map(transaction => 
-        prisma.transaction.update({
-          where: { id: transaction.id },
-          data: {
-            description: `[SUPPRIMÉ] ${transaction.description}`,
-            archived: true,
-            archivedAt: new Date(),
-            metadata: JSON.stringify({
-              deleted: true,
-              deletedBy,
-              deletedAt: new Date().toISOString(),
-              originalDescription: transaction.description,
-              deletionReason: 'Suppression ligne partenaire depuis dashboard',
-              partnerType: partnerInfo.type,
-              partnerName: partnerInfo.nom,
-              scope: 'TODAY_ONLY',
-              historicalDataUntouched: true
-            })
-          }
-        })
-      );
-  
-      await Promise.all(updatePromises);
-      console.log(`✅ [PARTNER DELETE] ${transactions.length} transaction(s) archivées`);
-  
-      // 🆕 Créer l'audit avec les bonnes infos selon le type
-      await prisma.transaction.create({
+    });
+
+    console.log(`📊 [PARTNER DELETE] ${transactions.length} transaction(s) active(s) après filtrage`);
+
+    if (transactions.length === 0) {
+      throw new Error(`Aucune transaction active trouvée pour ${partnerName}`);
+    }
+
+    const firstTransaction = transactions[0];
+    const isRegisteredPartner = !!firstTransaction.partenaireId;
+    const partnerInfo = isRegisteredPartner 
+      ? {
+          id: firstTransaction.partenaire.id,
+          nom: firstTransaction.partenaire.nomComplet,
+          telephone: firstTransaction.partenaire.telephone,
+          type: 'ENREGISTRÉ'
+        }
+      : {
+          id: null,
+          nom: firstTransaction.partenaireNom,
+          telephone: null,
+          type: 'NOM LIBRE'
+        };
+
+    console.log(`✅ [PARTNER DELETE] Type partenaire: ${partnerInfo.type}`, partnerInfo);
+
+    const totalValue = transactions.reduce((sum, tx) => sum + Number(tx.montant), 0) / 100;
+    console.log(`💰 [PARTNER DELETE] Valeur totale à supprimer: ${totalValue} F`);
+
+    // ✅ CORRECTION 3 : Marquer comme SUPPRIMÉES avec metadata persistant
+    const updatePromises = transactions.map(transaction => {
+      // Parser le metadata existant
+      let existingMetadata = {};
+      if (transaction.metadata) {
+        try {
+          existingMetadata = typeof transaction.metadata === 'string' 
+            ? JSON.parse(transaction.metadata) 
+            : transaction.metadata;
+        } catch (e) {
+          console.warn(`⚠️ Erreur parsing metadata pour tx ${transaction.id}`);
+        }
+      }
+
+      // Créer le nouveau metadata avec le flag de suppression
+      const newMetadata = {
+        ...existingMetadata,
+        deleted: true, // ✅ FLAG CRITIQUE
+        deletedBy,
+        deletedAt: new Date().toISOString(),
+        originalDescription: transaction.description,
+        deletionReason: 'Suppression ligne partenaire depuis dashboard',
+        partnerType: partnerInfo.type,
+        partnerName: partnerInfo.nom,
+        scope: 'PERMANENT',
+        excludeFromAllViews: true, // ✅ Exclusion de TOUTES les vues
+        excludeFromHistoricalSnapshots: true,
+        excludeFromYesterdayView: true,
+        excludeFromTodayView: true
+      };
+
+      return prisma.transaction.update({
+        where: { id: transaction.id },
         data: {
-          montant: BigInt(Math.round(totalValue * 100)),
-          type: 'AUDIT_SUPPRESSION',
-          description: `Suppression transactions partenaire ${partnerInfo.nom} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F - Type: ${partnerInfo.type} - Affecte UNIQUEMENT TODAY`,
-          envoyeurId: deletedBy,
-          destinataireId: supervisorId,
-          // 🆕 Ajouter partenaireId SEULEMENT si c'est un partenaire enregistré
-          ...(isRegisteredPartner && { partenaireId: partnerInfo.id }),
-          // 🆕 Ajouter partenaireNom pour les deux types (pour historique)
-          partenaireNom: partnerInfo.nom,
-          metadata: JSON.stringify({
-            action: 'DELETE_PARTNER_TRANSACTIONS',
-            lineType,
-            partnerName: partnerInfo.nom,
-            partnerId: partnerInfo.id,
-            partnerPhone: partnerInfo.telephone,
-            partnerType: partnerInfo.type,
-            transactionCount: transactions.length,
-            totalValue,
-            transactionType,
-            transactionIds: transactions.map(t => t.id),
-            deletedBy,
-            deletedAt: new Date().toISOString(),
-            scope: 'TODAY_ONLY',
-            historicalDataUntouched: true
-          })
+          description: `[SUPPRIMÉ] ${transaction.description}`,
+          archived: true,
+          archivedAt: new Date(),
+          metadata: JSON.stringify(newMetadata) // ✅ Sauvegarder le metadata enrichi
         }
       });
-  
-      await NotificationService.createNotification({
-        userId: supervisorId,
-        title: 'Transactions partenaire supprimées',
-        message: `${transactions.length} transaction(s) ${transactionType} de ${partnerInfo.nom} (${totalValue} F) ont été supprimées (affecte uniquement TODAY)`,
-        type: 'AUDIT_SUPPRESSION'
-      });
-  
-      const result = {
-        partnerName: partnerInfo.nom,
-        partnerId: partnerInfo.id,
-        partnerPhone: partnerInfo.telephone,
-        partnerType: partnerInfo.type,
-        isRegisteredPartner,
-        lineType,
-        transactionType,
-        transactionsDeleted: transactions.length,
-        oldValue: totalValue,
-        newValue: 0,
-        scope: 'TODAY_ONLY'
-      };
-  
-      console.log('✅ [PARTNER DELETE] Suppression terminée avec succès:', result);
-      return result;
-  
-    } catch (error) {
-      console.error('❌ [PARTNER DELETE] Erreur deletePartnerAccountLine:', error);
-      throw error;
-    }
+    });
+
+    await Promise.all(updatePromises);
+    console.log(`✅ [PARTNER DELETE] ${transactions.length} transaction(s) marquées comme SUPPRIMÉES DÉFINITIVEMENT`);
+
+    // Créer l'audit
+    await prisma.transaction.create({
+      data: {
+        montant: BigInt(Math.round(totalValue * 100)),
+        type: 'AUDIT_SUPPRESSION',
+        description: `Suppression DÉFINITIVE transactions partenaire ${partnerInfo.nom} (${lineType}) - ${transactions.length} transaction(s) - ${totalValue} F - Type: ${partnerInfo.type}`,
+        envoyeurId: deletedBy,
+        destinataireId: supervisorId,
+        ...(isRegisteredPartner && { partenaireId: partnerInfo.id }),
+        partenaireNom: partnerInfo.nom,
+        metadata: JSON.stringify({
+          action: 'DELETE_PARTNER_TRANSACTIONS_PERMANENT',
+          lineType,
+          partnerName: partnerInfo.nom,
+          partnerId: partnerInfo.id,
+          partnerPhone: partnerInfo.telephone,
+          partnerType: partnerInfo.type,
+          transactionCount: transactions.length,
+          totalValue,
+          transactionType,
+          transactionIds: transactions.map(t => t.id),
+          deletedBy,
+          deletedAt: new Date().toISOString(),
+          scope: 'PERMANENT',
+          affectsHistory: true
+        })
+      }
+    });
+
+    await NotificationService.createNotification({
+      userId: supervisorId,
+      title: 'Transactions partenaire supprimées',
+      message: `${transactions.length} transaction(s) ${transactionType} de ${partnerInfo.nom} (${totalValue} F) ont été supprimées DÉFINITIVEMENT`,
+      type: 'AUDIT_SUPPRESSION'
+    });
+
+    const result = {
+      partnerName: partnerInfo.nom,
+      partnerId: partnerInfo.id,
+      partnerPhone: partnerInfo.telephone,
+      partnerType: partnerInfo.type,
+      isRegisteredPartner,
+      lineType,
+      transactionType,
+      transactionsDeleted: transactions.length,
+      oldValue: totalValue,
+      newValue: 0,
+      scope: 'PERMANENT'
+    };
+
+    console.log('✅ [PARTNER DELETE] Suppression DÉFINITIVE terminée:', result);
+    return result;
+
+  } catch (error) {
+    console.error('❌ [PARTNER DELETE] Erreur deletePartnerAccountLine:', error);
+    throw error;
   }
+}
 
   resetAccountLine = async (req, res) => {
     try {
@@ -718,8 +776,7 @@ class AccountLineController {
         ? Number(account.initialBalance) / 100 
         : Number(account.balance) / 100;
   
-      // 🔒 CRITIQUE : Modifier UNIQUEMENT balance ou initialBalance
-      // ⚠️ JAMAIS previousInitialBalance (données historiques protégées)
+      // Modifier UNIQUEMENT balance ou initialBalance (jamais previousInitialBalance)
       const updateData = {};
       if (lineType === 'debut') {
         updateData.initialBalance = BigInt(newValueCentimes);
@@ -733,7 +790,6 @@ class AccountLineController {
       });
   
       console.log(`✅ [RESET] Compte ${accountKey} (${lineType}) modifié: ${oldValue} F → ${newValue} F (TODAY uniquement)`);
-      console.log(`🔒 [RESET] previousInitialBalance PROTÉGÉ : ${Number(account.previousInitialBalance) / 100} F`);
   
       await prisma.transaction.create({
         data: {
@@ -752,11 +808,7 @@ class AccountLineController {
             resetBy: userId,
             resetByRole: req.user.role,
             resetAt: new Date().toISOString(),
-            hasOwnTransactions: resetPermission.hasOwnTransactions,
-            accountCreated: account.createdAt.getTime() === account.updatedAt.getTime(),
-            previousInitialBalancePreserved: Number(account.previousInitialBalance) / 100,
-            scope: 'TODAY_ONLY',
-            historicalDataUntouched: true
+            scope: 'TODAY_ONLY'
           })
         }
       });
@@ -767,6 +819,18 @@ class AccountLineController {
         message: `Votre compte ${accountKey} (${lineType === 'debut' ? 'début' : 'sortie'}) a été réinitialisé de ${oldValue} F à ${newValue} F${req.user.role === 'ADMIN' ? ' par un administrateur' : ''} (affecte uniquement TODAY)`,
         type: 'AUDIT_MODIFICATION'
       });
+
+      // 🆕 CRITIQUE : Recréer le snapshot d'aujourd'hui après modification
+      console.log('📸 [CONTROLLER] Recréation du snapshot après réinitialisation...');
+      try {
+        const { default: TransactionService } = await import('../services/TransactionService.js');
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        await TransactionService.createDailySnapshot(supervisorId, today);
+        console.log('✅ [CONTROLLER] Snapshot TODAY recréé avec nouvelles valeurs');
+      } catch (snapshotError) {
+        console.error('⚠️ [CONTROLLER] Erreur snapshot (non-bloquante):', snapshotError);
+      }
   
       res.json({
         success: true,
@@ -778,10 +842,7 @@ class AccountLineController {
           newValue,
           resetAt: new Date(),
           resetBy: req.user.role,
-          hasOwnTransactions: resetPermission.hasOwnTransactions,
           supervisor: supervisor.nomComplet,
-          historicalDataPreserved: true,
-          previousInitialBalance: Number(account.previousInitialBalance) / 100,
           scope: 'TODAY_ONLY'
         }
       });
@@ -795,6 +856,7 @@ class AccountLineController {
       });
     }
   }
+
   
 
   checkDeletePermissions = async (user, supervisorId, accountKey) => {
