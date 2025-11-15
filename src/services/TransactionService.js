@@ -275,6 +275,39 @@ class TransactionService {
 // =====================================
 // À ajouter dans TransactionService.js, juste avant generateReference()
 
+// =====================================
+// TYPES DE COMPTES AUTORISÉS (WAVE ET AUTRES RETIRÉS)
+// =====================================
+static ALLOWED_ACCOUNT_TYPES = [
+  'LIQUIDE',
+  'ORANGE_MONEY',
+  'UV_MASTER'  // ✅ UV_MASTER maintenant autorisé
+];
+
+static ACCOUNT_TYPE_LABELS = {
+  'LIQUIDE': 'Liquide',
+  'ORANGE_MONEY': 'Orange Money',
+  'UV_MASTER': 'UV Master'
+};
+
+static ACCOUNT_TYPE_ICONS = {
+  'LIQUIDE': '💵',
+  'ORANGE_MONEY': '📱',
+  'UV_MASTER': '⭐'
+};
+
+// =====================================
+// VALIDATION DES TYPES DE COMPTES
+// =====================================
+isValidAccountType(accountType) {
+  return TransactionService.ALLOWED_ACCOUNT_TYPES.includes(accountType.toUpperCase());
+}
+
+
+getAllowedAccountTypes() {
+  return TransactionService.ALLOWED_ACCOUNT_TYPES;
+}
+
 async createDailySnapshot(userId, date = new Date()) {
   try {
     const targetDate = new Date(date);
@@ -296,14 +329,10 @@ async createDailySnapshot(userId, date = new Date()) {
       userId,
       liquideDebut: 0,
       orangeMoneyDebut: 0,
-      waveDebut: 0,
-      uvMasterDebut: 0,
-      autresDebut: 0,
+      uvMasterDebut: 0,  // ✅ Ajouté
       liquideFin: 0,
       orangeMoneyFin: 0,
-      waveFin: 0,
-      uvMasterFin: 0,
-      autresFin: 0,
+      uvMasterFin: 0,    // ✅ Ajouté
       debutTotal: 0,
       sortieTotal: 0,
       grTotal: 0
@@ -322,24 +351,15 @@ async createDailySnapshot(userId, date = new Date()) {
           snapshotData.orangeMoneyDebut = debut;
           snapshotData.orangeMoneyFin = fin;
           break;
-        case 'WAVE':
-          snapshotData.waveDebut = debut;
-          snapshotData.waveFin = fin;
-          break;
-        case 'UV_MASTER':
+        case 'UV_MASTER':  // ✅ Ajouté
           snapshotData.uvMasterDebut = debut;
           snapshotData.uvMasterFin = fin;
-          break;
-        case 'AUTRES':
-          snapshotData.autresDebut = debut;
-          snapshotData.autresFin = fin;
           break;
       }
       
       snapshotData.debutTotal += Number(debut);
       snapshotData.sortieTotal += Number(fin);
     });
-    
     snapshotData.grTotal = snapshotData.sortieTotal - snapshotData.debutTotal;
     
     const snapshot = await prisma.dailySnapshot.upsert({
@@ -724,7 +744,7 @@ async migrateHistoricalDataToSnapshots(daysBack = 7) {
 
   // =====================================
   // CRÉATION ADMIN TRANSACTION
-  // =====================================
+  // ================================cr=====
   async createAdminTransaction(adminId, transactionData) {
     try {
       const { 
@@ -2607,9 +2627,17 @@ async getSupervisorDashboard(superviseurId, period = 'today', customDate = null)
 
   async createSupervisorTransaction(superviseurId, transactionData) {
     try {
+      console.log(`👤 [SUPERVISEUR TRANSACTION] ${superviseurId} crée une transaction`, transactionData);
+      
+      // ✅ Validation du type de compte pour superviseur
+      if (transactionData.typeCompte && !this.isValidAccountType(transactionData.typeCompte)) {
+        throw new Error(`Type de compte non autorisé. Types disponibles: ${this.getAllowedAccountTypes().join(', ')}`);
+      }
+      
+      // Les superviseurs utilisent la même logique que l'admin
       return await this.createAdminTransaction(superviseurId, transactionData);
     } catch (error) {
-      console.error('Erreur createSupervisorTransaction:', error);
+      console.error('❌ [SUPERVISEUR TRANSACTION] Erreur:', error);
       throw error;
     }
   }

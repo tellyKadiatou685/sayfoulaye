@@ -40,7 +40,8 @@ const validateAccountType = (req, res, next) => {
     return next();
   }
   
-  const validTypes = ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER', 'AUTRES'];
+  // ✅ CORRECTION : Retirer WAVE et AUTRES, garder UV_MASTER
+  const validTypes = ['LIQUIDE', 'ORANGE_MONEY', 'UV_MASTER'];
   
   if (!typeCompte || !validTypes.includes(typeCompte.toUpperCase())) {
     return res.status(400).json({
@@ -65,7 +66,6 @@ const validateOperation = (req, res, next) => {
 
   next();
 };
-
 
 
 
